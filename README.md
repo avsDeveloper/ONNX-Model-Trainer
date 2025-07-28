@@ -1,3 +1,12 @@
+
+This app is primarily written by AI, intended to train AI models using AI-generated datasets. These models will be used by AI-based apps :)
+
+Use it at your own risk, it won't break your PC, but I can guarantee nothing. I made it for myself, and I happily use it for my next cross-platform project.
+
+The rest of the readme is written by AI...
+
+==================
+
 # 🤖 ONNX Model Trainer
 
 A comprehensive GUI application for training, exporting, and testing transformer language models with full ONNX optimization support. Train models locally and export them for optimized deployment across different platforms.
