@@ -2166,8 +2166,81 @@ class ModelTrainer:
         finally:
             self.training_finished()
             
+    def _run_with_gpu_fallback(self, func, *args, operation_name="operation"):
+        """
+        Run a function with automatic GPU memory fallback.
+        If CUDA out of memory error occurs, retry with CPU-only mode.
+        """
+        try:
+            # Store original training device before attempting GPU operation
+            self.store_original_training_device()
+            
+            # First attempt with auto device strategy
+            return func(*args, "auto")
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # Check for CUDA out of memory errors
+            if ('cuda' in error_msg and 'out of memory' in error_msg) or \
+               ('memory' in error_msg and 'allocate' in error_msg) or \
+               ('runtimeerror' in error_msg and 'cuda' in error_msg):
+                
+                self.log_message(f"⚠️ GPU memory insufficient for {operation_name}")
+                self.log_message("🔄 Automatically switching to CPU-only mode...")
+                
+                # Update training device display to show CPU fallback
+                self.update_training_device_display("cpu_only")
+                
+                # Clear GPU cache if possible
+                try:
+                    if torch and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        self.log_message("🧹 GPU memory cache cleared")
+                        
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                        
+                        # Additional cleanup - try to clear all GPU memory
+                        try:
+                            torch.cuda.ipc_collect()
+                        except:
+                            pass
+                except:
+                    pass
+                
+                # Set environment variable to hide CUDA devices before retry
+                import os
+                old_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                
+                try:
+                    # Retry with CPU-only mode
+                    result = func(*args, "cpu_only")
+                    self.log_message(f"✅ {operation_name.capitalize()} completed successfully using CPU")
+                    return result
+                except Exception as cpu_error:
+                    self.log_message(f"❌ {operation_name.capitalize()} failed even with CPU-only mode: {str(cpu_error)}")
+                    raise cpu_error
+                finally:
+                    # Restore original CUDA_VISIBLE_DEVICES
+                    if old_cuda_visible is not None:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible
+                    else:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                    
+                    # Restore original training device display after operation
+                    self.root.after(1000, lambda: self.update_training_device_display("auto"))
+            else:
+                # Not a memory error, re-raise original exception
+                raise e
+        
     def run_actual_training(self, train_dir):
-        """Run standard model training using HuggingFace transformers"""
+        """Run standard model training using HuggingFace transformers with GPU memory fallback"""
+        return self._run_with_gpu_fallback(self._run_actual_training_impl, train_dir, operation_name="training")
+    
+    def _run_actual_training_impl(self, train_dir, device_strategy="auto"):
+        """Implementation of actual training with device strategy parameter"""
         try:
             # Simple progress callback to track training progress
             class ProgressCallback(TrainerCallback):
@@ -2205,10 +2278,33 @@ class ModelTrainer:
                 tokenizer.pad_token = tokenizer.eos_token
             self.log_message("✅ Tokenizer loaded")
                 
-            # Load model with no caching
+            # Load model with device strategy consideration
             self.log_message("🔄 Loading model...")
-            model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=None)
-            self.log_message("✅ Model loaded")
+            if device_strategy == "cpu_only":
+                # Force CPU-only loading - ensure no GPU usage at all
+                import os
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Hide CUDA devices
+                
+                # Disable CUDA backends
+                import torch
+                torch.backends.cudnn.enabled = False
+                
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, 
+                    cache_dir=None,
+                    torch_dtype=torch.float32,
+                    device_map="cpu",
+                    low_cpu_mem_usage=True
+                )
+                
+                # Force model to CPU and make sure it stays there
+                model = model.to("cpu")
+                
+                self.log_message("✅ Model loaded (CPU-only mode)")
+            else:
+                # Auto device mapping (default behavior)
+                model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=None)
+                self.log_message("✅ Model loaded")
             
             # Load and format dataset
             self.log_message("📚 Loading training dataset...")
@@ -2233,19 +2329,34 @@ class ModelTrainer:
                 mlm=False,
             )
             
-            # Standard training arguments
-            training_args = TrainingArguments(
-                output_dir=str(train_dir),
-                num_train_epochs=self.epochs.get(),
-                per_device_train_batch_size=self.batch_size.get(),
-                learning_rate=float(self.learning_rate.get()),
-                weight_decay=self.weight_decay.get(),
-                warmup_steps=self.warmup_steps.get(),
-                logging_steps=50,
-                save_steps=self.save_steps.get(),
-                report_to="none",
-                save_total_limit=3,
-            )
+            # Training arguments with device strategy consideration
+            training_args_kwargs = {
+                "output_dir": str(train_dir),
+                "num_train_epochs": self.epochs.get(),
+                "per_device_train_batch_size": self.batch_size.get(),
+                "learning_rate": float(self.learning_rate.get()),
+                "weight_decay": self.weight_decay.get(),
+                "warmup_steps": self.warmup_steps.get(),
+                "logging_steps": 50,
+                "save_steps": self.save_steps.get(),
+                "report_to": "none",
+                "save_total_limit": 3,
+            }
+            
+            # Adjust settings for CPU-only mode
+            if device_strategy == "cpu_only":
+                training_args_kwargs.update({
+                    "fp16": False,
+                    "bf16": False,
+                    "dataloader_pin_memory": False,
+                    "no_cuda": True,  # Force no CUDA usage
+                })
+                # Reduce batch size for CPU training if it's too large
+                if self.batch_size.get() > 4:
+                    training_args_kwargs["per_device_train_batch_size"] = min(4, self.batch_size.get())
+                    self.log_message(f"🔧 Reduced batch size to {training_args_kwargs['per_device_train_batch_size']} for CPU training")
+            
+            training_args = TrainingArguments(**training_args_kwargs)
             
             # Create trainer
             progress_callback = ProgressCallback(self)
@@ -2258,8 +2369,11 @@ class ModelTrainer:
             )
             
             # Start training
-            self.log_message("🚀 Starting model training...")
-            self.log_message(f"📊 Training: {self.epochs.get()} epochs, batch size {self.batch_size.get()}")
+            if device_strategy == "cpu_only":
+                self.log_message("🚀 Starting model training (CPU-only mode)...")
+            else:
+                self.log_message("🚀 Starting model training...")
+            self.log_message(f"📊 Training: {self.epochs.get()} epochs, batch size {training_args.per_device_train_batch_size}")
             trainer.train()
             self.log_message("✅ Training completed successfully")
             
@@ -3046,6 +3160,66 @@ Choose based on your hardware and model size."""
             self.train_memory_usage_label.config(text=f"❌ Device detection failed: {str(e)}", foreground='red')
             self.train_device_help_button.config(state='disabled')
     
+    def update_training_device_display(self, device_strategy):
+        """Update the training device display based on current device strategy"""
+        try:
+            if not hasattr(self, 'train_device_combo'):
+                return
+                
+            current_device = self.train_device_combo.get()
+            
+            if device_strategy == "cpu_only":
+                # Update to show CPU fallback
+                fallback_text = "CPU Only (GPU Memory Fallback)"
+                self.train_device_combo.set(fallback_text)
+                
+                # Update memory usage display for CPU mode
+                try:
+                    import psutil
+                    ram_info = psutil.virtual_memory()
+                    ram_free = ram_info.available / (1024**3)
+                    ram_total = ram_info.total / (1024**3)
+                    
+                    current_model = self.model_name.get()
+                    model_info_text = ""
+                    if current_model and current_model in self.model_info_db:
+                        model_info = self.model_info_db[current_model]
+                        model_size_str = model_info.get('size_pytorch', 'Unknown')
+                        if model_size_str != 'Unknown':
+                            model_info_text = f" • 📦 Model: {model_size_str}"
+                    
+                    memory_text = f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total{model_info_text} • 🔄 Automatic CPU fallback active"
+                    self.train_memory_usage_label.config(text=memory_text, foreground='orange')
+                    
+                except ImportError:
+                    self.train_memory_usage_label.config(text="💾 CPU Mode (GPU Memory Fallback) • Install psutil for memory info", foreground='orange')
+                except Exception:
+                    self.train_memory_usage_label.config(text="💾 CPU Mode (GPU Memory Fallback) • Memory info unavailable", foreground='orange')
+                    
+            elif device_strategy == "auto":
+                # Restore original device selection
+                if hasattr(self, 'original_training_device'):
+                    self.train_device_combo.set(self.original_training_device)
+                else:
+                    # Restore to first GPU or CPU if no original stored
+                    device_options = self.train_device_combo['values']
+                    if device_options:
+                        self.train_device_combo.set(device_options[0])
+                
+                # Update memory usage display normally
+                self.update_train_memory_usage_display()
+                
+        except Exception as e:
+            self.log_message(f"⚠️ Error updating training device display: {str(e)}")
+
+    def store_original_training_device(self):
+        """Store the original training device selection before fallback"""
+        try:
+            if hasattr(self, 'train_device_combo'):
+                self.original_training_device = self.train_device_combo.get()
+        except Exception:
+            pass
+
     def update_train_memory_usage_display(self):
         """Update the memory usage display for training based on selected device and model"""
         try:
@@ -3325,13 +3499,20 @@ Choose based on your hardware and model size."""
             self.log_message("   Falling back to standard save - tokenizer should still work")
             
     def run_onnx_export(self, source_dir, convert_dir):
+        """Export trained model or pretrained model to ONNX format with GPU memory fallback"""
+        return self._run_with_gpu_fallback(self._run_onnx_export_impl, source_dir, convert_dir, operation_name="ONNX export")
+    
+    def _run_onnx_export_impl(self, source_dir, convert_dir, device_strategy="auto"):
         """Export trained model or pretrained model to ONNX format"""
         try:
             
             if source_dir is None:
                 # Export pretrained model directly
                 model_name = self.model_name.get()
-                self.log_message(f"� Converting pretrained model to ONNX: {model_name}")
+                if device_strategy == "cpu_only":
+                    self.log_message(f"🔄 Converting pretrained model to ONNX (CPU-only): {model_name}")
+                else:
+                    self.log_message(f"🔄 Converting pretrained model to ONNX: {model_name}")
                 
                 # First, validate that we can load the model
                 self.log_message("🔍 Validating model availability...")
@@ -3344,13 +3525,21 @@ Choose based on your hardware and model size."""
                     test_tokenizer = AutoTokenizer.from_pretrained(model_name)
                     self.log_message("✅ Tokenizer validation successful")
                     
-                    # Quick model load test with minimal memory usage
-                    test_model = AutoModelForCausalLM.from_pretrained(
-                        model_name, 
-                        torch_dtype=torch.float32,
-                        device_map="auto" if torch.cuda.is_available() else "cpu",
-                        low_cpu_mem_usage=True
-                    )
+                    # Quick model load test with device strategy consideration
+                    if device_strategy == "cpu_only":
+                        test_model = AutoModelForCausalLM.from_pretrained(
+                            model_name, 
+                            torch_dtype=torch.float32,
+                            device_map="cpu",
+                            low_cpu_mem_usage=True
+                        )
+                    else:
+                        test_model = AutoModelForCausalLM.from_pretrained(
+                            model_name, 
+                            torch_dtype=torch.float32,
+                            device_map="auto" if torch.cuda.is_available() else "cpu",
+                            low_cpu_mem_usage=True
+                        )
                     self.log_message("✅ Model validation successful")
                     del test_model, test_tokenizer  # Free memory immediately
                     
@@ -3358,20 +3547,31 @@ Choose based on your hardware and model size."""
                     self.log_message(f"❌ Model validation failed: {val_error}")
                     raise Exception(f"Cannot load model {model_name}: {val_error}")
                 
-                # Try ONNX export with better error handling
+                # Try ONNX export with device strategy consideration
                 self.log_message("🔄 Starting ONNX export...")
                 try:
+                    # Force CPU export for CPU-only mode
+                    export_kwargs = {
+                        "export": True,
+                        "use_cache": False  # Disable caching to avoid state conflicts
+                    }
+                    
+                    if device_strategy == "cpu_only":
+                        # Force export on CPU to avoid GPU memory issues
+                        export_kwargs.update({
+                            "torch_dtype": torch.float32,
+                            "device_map": "cpu"
+                        })
+                        
                     ort_model = ORTModelForCausalLM.from_pretrained(
                         model_name, 
-                        export=True,
-                        use_cache=False  # Disable caching to avoid state conflicts
+                        **export_kwargs
                     )
                     self.log_message("✅ ONNX export completed")
                 except Exception as export_error:
                     self.log_message(f"❌ ONNX export failed: {export_error}")
                     # Try alternative approach without optimum
                     raise Exception(f"ONNX export failed for {model_name}: {export_error}")
-                self.log_message("✅ ONNX export completed")
                 
             else:
                 # Export trained model
@@ -3409,6 +3609,10 @@ Choose based on your hardware and model size."""
             raise
             
     def run_onnx_quantization(self, convert_dir, quantize_dir):
+        """Quantize ONNX model with GPU memory fallback"""
+        return self._run_with_gpu_fallback(self._run_onnx_quantization_impl, convert_dir, quantize_dir, operation_name="quantization")
+    
+    def _run_onnx_quantization_impl(self, convert_dir, quantize_dir, device_strategy="auto"):
         """Quantize ONNX model using standard procedures"""
         try:
             
@@ -3418,10 +3622,13 @@ Choose based on your hardware and model size."""
             if not input_onnx.exists():
                 raise Exception(f"ONNX model not found at {input_onnx}")
             
-            self.log_message("🔧 Starting quantization...")
+            if device_strategy == "cpu_only":
+                self.log_message("🔧 Starting quantization (CPU-only mode)...")
+            else:
+                self.log_message("🔧 Starting quantization...")
             quantize_dir.mkdir(parents=True, exist_ok=True)
             
-            # Standard quantization
+            # Standard quantization (quantization is typically CPU-bound anyway)
             quantize_dynamic(
                 model_input=str(input_onnx),
                 model_output=str(output_onnx),
@@ -3652,6 +3859,9 @@ Choose based on your hardware and model size."""
         self.train_button.config(state='normal')
         self.stop_button.config(state='disabled')
         self.update_task_status("Training completed - Ready for next task")
+        
+        # Restore original training device display
+        self.update_training_device_display("auto")
     
     def refresh_model_list(self):
         """Refresh the list of available ONNX models"""
