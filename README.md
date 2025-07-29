@@ -11,6 +11,10 @@ The rest of the readme is written by AI...
 
 A comprehensive GUI application for training, exporting, and testing transformer language models with full ONNX optimization support. Features timestamped session management, enhanced system monitoring, and interactive model testing capabilities.
 
+<img width="1398" height="934" alt="Screenshot from 2025-07-29 14-31-54" src="https://github.com/user-attachments/assets/175568db-a46a-4bc9-9d3f-cb0ce307b911" /> <img width="1400" height="932" alt="Screenshot from 2025-07-29 14-35-16" src="https://github.com/user-attachments/assets/bcf19185-d31d-48e7-a98a-59bd168d2700" />
+
+
+
 ## ✨ Key Features
 
 ### 🎯 Complete Training Pipeline
