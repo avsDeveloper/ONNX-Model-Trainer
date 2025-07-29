@@ -169,6 +169,7 @@ class ModelTrainer:
         # Initialize variables
         self.training_thread = None
         self.is_training = False
+        self.force_stop = False  # Flag for immediate termination
         self.dataset_path = tk.StringVar()
         self.output_path = tk.StringVar(value="./output")
         self.model_name = tk.StringVar(value="distilgpt2")  # Default to distilgpt2
@@ -2086,6 +2087,7 @@ class ModelTrainer:
             return
             
         self.is_training = True
+        self.force_stop = False  # Reset force stop flag
         self.train_button.config(state='disabled')
         self.stop_button.config(state='normal')
         
@@ -2132,15 +2134,31 @@ class ModelTrainer:
                 train_dir.mkdir(exist_ok=True)
                 self.log_message(f"📁 Created training output directory: {train_dir}")
                 self.log_message("📚 Step 1: Training model...")
+                
+                # Check for interruption before training
+                if not self.is_training or self.force_stop:
+                    self.log_message("⏹️ Training stopped before starting")
+                    return
+                    
                 self.run_actual_training(train_dir)
                 source_dir = train_dir
+                
+                # Check for interruption after training
+                if not self.is_training or self.force_stop:
+                    self.log_message("⏹️ Training stopped after training step")
+                    return
             else:
                 # For conversion mode, use the pretrained model directly
-                self.log_message("� Using pretrained model for conversion...")
+                self.log_message("🔄 Using pretrained model for conversion...")
                 source_dir = None  # Will use model name directly
             
             # Step 2: ONNX Export
             if self.action_export.get():
+                # Check for interruption before export
+                if not self.is_training or self.force_stop:
+                    self.log_message("⏹️ Operation stopped before ONNX export")
+                    return
+                    
                 convert_dir.mkdir(exist_ok=True)
                 if training_enabled:
                     self.log_message("🔄 Step 2: Converting trained model to ONNX...")
@@ -2150,8 +2168,18 @@ class ModelTrainer:
                     self.set_export_progress(0)
                 self.run_onnx_export(source_dir, convert_dir)
                 
+                # Check for interruption after export
+                if not self.is_training or self.force_stop:
+                    self.log_message("⏹️ Operation stopped after ONNX export")
+                    return
+                
                 # Step 3: Quantization
                 if self.action_quantize.get():
+                    # Check for interruption before quantization
+                    if not self.is_training or self.force_stop:
+                        self.log_message("⏹️ Operation stopped before quantization")
+                        return
+                        
                     quantize_dir.mkdir(exist_ok=True)
                     if training_enabled:
                         self.log_message("⚙️ Step 3: Quantizing ONNX model...")
@@ -2159,6 +2187,11 @@ class ModelTrainer:
                         self.log_message("⚙️ Step 2: Quantizing ONNX model...")
                     self.set_quantization_progress(0)
                     self.run_onnx_quantization(convert_dir, quantize_dir)
+                    
+                    # Check for interruption after quantization
+                    if not self.is_training or self.force_stop:
+                        self.log_message("⏹️ Operation stopped after quantization")
+                        return
                     
             if self.is_training:
                 if training_enabled:
@@ -2251,7 +2284,7 @@ class ModelTrainer:
     def _run_actual_training_impl(self, train_dir, device_strategy="auto"):
         """Implementation of actual training with device strategy parameter"""
         try:
-            # Simple progress callback to track training progress
+            # Simple progress callback to track training progress and handle interruption
             class ProgressCallback(TrainerCallback):
                 def __init__(self, trainer_ui):
                     self.trainer_ui = trainer_ui
@@ -2259,12 +2292,24 @@ class ModelTrainer:
                     self.current_epoch = 0
                     
                 def on_epoch_begin(self, args, state, control, **kwargs):
+                    # Check for stop signal
+                    if not self.trainer_ui.is_training or self.trainer_ui.force_stop:
+                        self.trainer_ui.log_message("🛑 Training interrupted during epoch start")
+                        control.should_training_stop = True
+                        return control
+                        
                     self.current_epoch = state.epoch + 1
                     self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
                         self.current_epoch, self.total_epochs, 0, 0, 0
                     ))
                     
                 def on_step_end(self, args, state, control, **kwargs):
+                    # Check for stop signal at every step
+                    if not self.trainer_ui.is_training or self.trainer_ui.force_stop:
+                        self.trainer_ui.log_message("🛑 Training interrupted during step")
+                        control.should_training_stop = True
+                        return control
+                        
                     if state.max_steps > 0:
                         step_percent = int((state.global_step / state.max_steps) * 100)
                         self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
@@ -2272,6 +2317,12 @@ class ModelTrainer:
                         ))
                         
                 def on_epoch_end(self, args, state, control, **kwargs):
+                    # Check for stop signal
+                    if not self.trainer_ui.is_training or self.trainer_ui.force_stop:
+                        self.trainer_ui.log_message("🛑 Training interrupted during epoch end")
+                        control.should_training_stop = True
+                        return control
+                        
                     self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
                         self.current_epoch, self.total_epochs, 100, 0, 0
                     ))
@@ -3514,6 +3565,10 @@ Choose based on your hardware and model size."""
     def _run_onnx_export_impl(self, source_dir, convert_dir, device_strategy="auto"):
         """Export trained model or pretrained model to ONNX format"""
         try:
+            # Check for interruption at start
+            if not self.is_training or self.force_stop:
+                self.log_message("⏹️ ONNX export stopped before starting")
+                return
             
             if source_dir is None:
                 # Export pretrained model directly
@@ -3558,6 +3613,12 @@ Choose based on your hardware and model size."""
                 
                 # Try ONNX export with device strategy consideration
                 self.log_message("🔄 Starting ONNX export...")
+                
+                # Check for interruption before export
+                if not self.is_training or self.force_stop:
+                    self.log_message("⏹️ ONNX export stopped before starting conversion")
+                    return
+                    
                 try:
                     # Force CPU export for CPU-only mode
                     export_kwargs = {
@@ -3624,6 +3685,10 @@ Choose based on your hardware and model size."""
     def _run_onnx_quantization_impl(self, convert_dir, quantize_dir, device_strategy="auto"):
         """Quantize ONNX model using standard procedures"""
         try:
+            # Check for interruption at start
+            if not self.is_training or self.force_stop:
+                self.log_message("⏹️ Quantization stopped before starting")
+                return
             
             input_onnx = convert_dir / "model.onnx"
             output_onnx = quantize_dir / "model.onnx"
@@ -3636,6 +3701,11 @@ Choose based on your hardware and model size."""
             else:
                 self.log_message("🔧 Starting quantization...")
             quantize_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Check for interruption before quantization
+            if not self.is_training or self.force_stop:
+                self.log_message("⏹️ Quantization stopped before processing")
+                return
             
             # Standard quantization (quantization is typically CPU-bound anyway)
             quantize_dynamic(
@@ -3755,24 +3825,59 @@ Choose based on your hardware and model size."""
             self.log_message("  Model files created, but manual testing recommended")
             
     def stop_training(self):
-        """Stop the current operation (training, ONNX conversion, or quantization)"""
-        self.is_training = False
+        """Stop the current operation (training, ONNX conversion, or quantization) with confirmation"""
+        from tkinter import messagebox
         
         # Determine what operation is being stopped based on current status
         current_status = getattr(self, 'current_operation', 'operation')
         
+        # Create appropriate confirmation message
         if 'training' in current_status.lower():
-            self.log_message("🛑 Training operation interrupted by user")
+            operation_name = "training"
+            operation_desc = "This will stop the current training process. Any progress will be lost."
         elif 'export' in current_status.lower() or 'convert' in current_status.lower():
-            self.log_message("🛑 ONNX conversion operation interrupted by user")
+            operation_name = "ONNX conversion"
+            operation_desc = "This will stop the current ONNX conversion process."
         elif 'quantiz' in current_status.lower():
-            self.log_message("🛑 Quantization operation interrupted by user")
+            operation_name = "quantization" 
+            operation_desc = "This will stop the current quantization process."
         else:
-            self.log_message("🛑 Current operation interrupted by user")
+            operation_name = "operation"
+            operation_desc = "This will stop the current operation."
         
-        # Update UI immediately
-        self.update_task_status("Stopped by user - Ready for next task")
+        # Show confirmation dialog
+        result = messagebox.askokcancel(
+            title=f"Stop {operation_name.title()}?",
+            message=f"Are you sure you want to stop the {operation_name}?\n\n{operation_desc}",
+            icon="warning"
+        )
         
+        if result:  # User clicked OK
+            # Set the stop flag
+            self.is_training = False
+            self.force_stop = True  # Additional flag for immediate termination
+            
+            # Log the interruption
+            if 'training' in current_status.lower():
+                self.log_message("🛑 Training process terminated by user")
+            elif 'export' in current_status.lower() or 'convert' in current_status.lower():
+                self.log_message("🛑 ONNX conversion process terminated by user")
+            elif 'quantiz' in current_status.lower():
+                self.log_message("🛑 Quantization process terminated by user")
+            else:
+                self.log_message("🛑 Current operation terminated by user")
+            
+            # Update UI immediately
+            self.update_task_status("Operation terminated by user - Ready for next task")
+            
+            # Try to terminate training thread if it exists
+            if hasattr(self, 'training_thread') and self.training_thread and self.training_thread.is_alive():
+                self.log_message("⚡ Attempting to terminate background process...")
+                # Note: Python threads cannot be forcefully killed, but our training loop will check the flags
+        else:
+            # User clicked Cancel - do nothing
+            self.log_message("💡 Stop operation cancelled by user")
+            
     def training_finished(self):
         """Clean up after training is finished"""
         self.root.after(0, self._training_finished_ui)
@@ -3780,6 +3885,7 @@ Choose based on your hardware and model size."""
     def _training_finished_ui(self):
         """Update UI after training is finished (must run in main thread)"""
         self.is_training = False
+        self.force_stop = False  # Reset force stop flag
         self.train_button.config(state='normal')
         self.stop_button.config(state='disabled')
         self.update_task_status("Training completed - Ready for next task")
