@@ -962,9 +962,6 @@ class ModelTrainer:
         self.stop_button = ttk.Button(self.training_buttons_frame, text="Stop Training", command=self.stop_training, state='disabled')
         self.stop_button.pack(side='left', padx=5)
         
-        self.export_button = ttk.Button(self.training_buttons_frame, text="Export Only", command=self.export_model_only, state='disabled')
-        self.export_button.pack(side='left', padx=5)
-        
         # Testing buttons
         self.testing_buttons_frame = ttk.Frame(self.buttons_frame)
         
@@ -1367,7 +1364,7 @@ class ModelTrainer:
             self.output_entry, self.output_button, self.epochs_spin,
             self.batch_spin, self.lr_combo, self.length_spin,
             self.save_spin, self.warmup_spin, self.model_info,
-            self.train_button, self.export_button, self.clear_button, self.save_button,
+            self.train_button, self.clear_button, self.save_button,
             self.test_download_button, self.train_checkbox, self.export_checkbox
         ]
         
@@ -1397,7 +1394,6 @@ class ModelTrainer:
         if ML_DEPENDENCIES_AVAILABLE:
             try:
                 self.train_button.config(state='normal')
-                self.export_button.config(state='normal')
                 self.generate_button.config(state='normal')
             except:
                 pass
@@ -1405,7 +1401,6 @@ class ModelTrainer:
             # Disable ML-dependent features
             try:
                 self.train_button.config(state='disabled')
-                self.export_button.config(state='disabled')  
                 self.generate_button.config(state='disabled')
             except:
                 pass
@@ -3690,61 +3685,6 @@ Choose based on your hardware and model size."""
             self.log_message(f"⚠ Warning: Could not test quantized model: {e}")
             self.log_message("  Model files created, but manual testing recommended")
             
-    def export_model_only(self):
-            self.log_message("🗑️ Cleaned up temporary ONNX file")
-            self.log_message(f"⚠️ Could not remove temporary file: {e}")
-            
-            # Check file sizes
-            original_input_onnx = convert_dir / "model.onnx"  # Use original for size comparison
-            original_size = original_input_onnx.stat().st_size / (1024*1024)
-            quantized_size = output_onnx.stat().st_size / (1024*1024)
-            
-            self.log_message(f"📊 Quantization Results:")
-            self.log_message(f"   • Original ONNX model: {original_size:.1f} MB")
-            self.log_message(f"   • Quantized ONNX model: {quantized_size:.1f} MB")
-            self.log_message(f"   • Size reduction: {((original_size - quantized_size) / original_size * 100):.1f}%")
-            
-            # Model size optimization check
-            optimized_target = 80  # MB
-            if quantized_size <= optimized_target:
-                self.log_message(f"✅ Optimization target achieved! ({quantized_size:.1f} MB ≤ {optimized_target} MB)")
-            else:
-                self.log_message(f"⚠️ Optimization target not achieved ({quantized_size:.1f} MB > {optimized_target} MB)")
-                self.log_message("   Note: The model may still be suitable for deployment but could be slower to load")
-            
-            # Copy tokenizer files using compatible save method
-            # Use global AutoTokenizer import
-            tokenizer = AutoTokenizer.from_pretrained(str(convert_dir))
-            self.save_compatible_tokenizer(tokenizer, quantize_dir)
-            
-            # Copy other necessary files safely
-            for file in ["config.json"]:
-                src = convert_dir / file
-                if src.exists():
-                    shutil.copy2(str(src), str(quantize_dir / file))
-                    self.log_message(f"📋 Copied {file}")
-                else:
-                    self.log_message(f"⚠️ {file} not found in source directory")
-            
-            # Verify quantized model integrity
-            self.log_message("🔍 Verifying quantized model...")
-            try:
-                # Quick test to ensure the quantized model can be loaded
-                # Use global onnxruntime import
-                session = self.create_onnx_session(str(output_onnx))
-                input_names = [inp.name for inp in session.get_inputs()]
-                self.log_message(f"✅ Quantized model verified - inputs: {input_names}")
-            except Exception as verify_error:
-                self.log_message(f"⚠️ Model verification warning: {verify_error}")
-            
-            self.log_message(f"� Optimized package created at: {quantize_dir}")
-            
-            # Test the quantized model
-            self.log_message("🧪 Testing quantized model...")
-            self.test_quantized_model(quantize_dir)
-            
-            self.set_quantization_progress(100)
-            
     def test_quantized_model(self, quantize_dir):
         """Test the quantized model with a simple prompt"""
         try:
@@ -3799,50 +3739,6 @@ Choose based on your hardware and model size."""
         except Exception as e:
             self.log_message(f"⚠ Warning: Could not test quantized model: {e}")
             self.log_message("  Model files created, but manual testing recommended")
-            
-    def export_model_only(self):
-        """Export existing model without training"""
-        if not self.system_ready:
-            messagebox.showerror("Error", "System check has not completed successfully")
-            return
-            
-        if not self.output_path.get():
-            messagebox.showerror("Error", "Please specify an output directory")
-            return
-            
-        # Check if we have a trained model to export
-        output_dir = Path(self.output_path.get())
-        train_dir = output_dir / "1_trained"
-        
-        if not train_dir.exists() or not (train_dir / "config.json").exists():
-            messagebox.showerror("Error", "No trained model found. Please train a model first.")
-            return
-            
-        self.log_message("🔄 Starting model export...")
-        threading.Thread(target=self.run_export_only, daemon=True).start()
-        
-    def run_export_only(self):
-        """Run export-only process"""
-        try:
-            output_dir = Path(self.output_path.get())
-            train_dir = output_dir / "1_trained"
-            convert_dir = output_dir / "2_converted"
-            quantize_dir = output_dir / "3_quantized"
-            
-            if self.action_export.get():
-                convert_dir.mkdir(parents=True, exist_ok=True)
-                self.log_message("� Converting to ONNX...")
-                self.run_onnx_export(train_dir, convert_dir)
-                
-                if self.action_quantize.get():
-                    quantize_dir.mkdir(parents=True, exist_ok=True)
-                    self.log_message("⚙️ Quantizing ONNX model...")
-                    self.run_onnx_quantization(convert_dir, quantize_dir)
-                
-            self.log_message("✅ Export completed successfully!")
-            
-        except Exception as e:
-            self.log_message(f"❌ Export error: {str(e)}")
             
     def stop_training(self):
         """Stop the training process"""
