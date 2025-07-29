@@ -1496,7 +1496,7 @@ class ModelTrainer:
     
             
     def start_system_check(self):
-        """Start comprehensive system check in background - non-blocking and interruptible"""
+        """Start comprehensive system check in background - fully independent"""
         self.log_message("🔍 Starting comprehensive system check...")
         self.update_task_status("System check in progress...")
         self.system_check_running = True
@@ -1511,134 +1511,165 @@ class ModelTrainer:
     
     def check_system_status(self):
         """Periodically check system check status - non-blocking"""
-        if self.system_check_cancelled:
-            # User closed window, stop checking
-            return
+        try:
+            if self.system_check_cancelled:
+                # User closed window or cancelled, stop checking
+                self.log_message("⏹️ System check cancelled")
+                return
+                
+            if not self.system_check_running:
+                # System check completed successfully
+                self.log_message("✅ System check monitoring complete")
+                return
             
-        if not self.system_check_running:
-            # System check completed
-            return
+            # Check again in 200ms - keeps UI very responsive
+            self.root.after(200, self.check_system_status)
             
-        # Check again in 100ms - keeps UI responsive
-        self.root.after(100, self.check_system_status)
+        except Exception as e:
+            self.log_message(f"⚠️ System status monitor error: {e}")
+            # Stop checking to prevent infinite loops
+            self.system_check_running = False
         
     def run_system_check(self):
-        """Run comprehensive system check - can be interrupted"""
+        """Run comprehensive system check in background - independent of UI"""
         try:
             # Check if cancelled before starting
             if self.system_check_cancelled:
+                self.log_message("⏹️ System check cancelled before start")
                 return
                 
-            self.log_message("🐍 Checking Python environment...")
+            self.log_message("� System Check Phase 1: Python Environment")
             python_version = sys.version_info
             
             if python_version >= (3, 7):
-                self.log_message(f"✅ Python {python_version.major}.{python_version.minor}.{python_version.micro} detected")
+                self.log_message(f"✅ Python {python_version.major}.{python_version.minor}.{python_version.micro} - Compatible")
             else:
-                self.log_message(f"❌ Python 3.7+ required, found {python_version.major}.{python_version.minor}")
+                self.log_message(f"❌ Python {python_version.major}.{python_version.minor}.{python_version.micro} - Requires Python 3.7+")
                 self.system_check_failed("Python version too old")
                 return
             
-            # Check for cancellation
+            # Check for cancellation between phases
             if self.system_check_cancelled:
+                self.log_message("⏹️ System check cancelled during Phase 1")
                 return
                 
-            # Check basic dependencies first
-            self.log_message("📦 Checking basic dependencies...")
+            # Phase 2: Basic Dependencies
+            self.log_message("� System Check Phase 2: Basic Dependencies")
             basic_modules = {
-                'tkinter': 'Tkinter (GUI)',
-                'threading': 'Threading',
-                'json': 'JSON',
-                'pathlib': 'Path utilities'
+                'tkinter': 'Tkinter (GUI Framework)',
+                'threading': 'Threading Support',
+                'json': 'JSON Processing',
+                'pathlib': 'Path Utilities',
+                'os': 'OS Interface',
+                'sys': 'System Interface',
+                'time': 'Time Functions'
             }
             
             for module, name in basic_modules.items():
+                if self.system_check_cancelled:
+                    self.log_message("⏹️ System check cancelled during dependency check")
+                    return
                 try:
                     __import__(module)
-                    self.log_message(f"✅ {name} available")
+                    self.log_message(f"✅ {name}")
                 except ImportError:
-                    self.log_message(f"❌ {name} missing")
-                    self.system_check_failed(f"Missing basic dependency: {name}")
+                    self.log_message(f"❌ {name} - MISSING")
+                    self.system_check_failed(f"Missing critical dependency: {name}")
                     return
-                
-            # Check if ML dependencies are available (non-blocking)
+            
+            # Phase 3: ML Dependencies (optional)
             if self.system_check_cancelled:
+                self.log_message("⏹️ System check cancelled before Phase 3")
                 return
                 
-            self.log_message("🤖 Checking ML dependencies (optional for GUI)...")
+            self.log_message("🔍 System Check Phase 3: ML Dependencies (Optional)")
             if not check_ml_dependencies():
                 self.log_message(f"⚠️ ML dependencies not available: {ML_IMPORT_ERROR}")
-                self.log_message("💡 Some features will be disabled. Install with: pip install torch transformers datasets optimum onnxruntime")
-                self.log_message("✅ GUI will start in basic mode")
+                self.log_message("💡 Limited functionality - Install: pip install torch transformers datasets optimum onnxruntime")
+                self.log_message("✅ GUI will run in basic mode")
             else:
                 self.log_message("✅ All ML dependencies available")
                 
-                # Check for cancellation before GPU check
+                # GPU Check (only if ML dependencies available)
                 if self.system_check_cancelled:
+                    self.log_message("⏹️ System check cancelled before GPU check")
                     return
                 
-                # Additional ML checks only if dependencies are available
-                self.log_message("🖥️ Checking compute capabilities...")
+                self.log_message("� System Check Phase 4: Hardware Capabilities")
                 try:
                     if torch and torch.cuda.is_available():
                         gpu_count = torch.cuda.device_count()
                         gpu_name = torch.cuda.get_device_name(0)
                         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                        self.log_message(f"✅ CUDA GPU available: {gpu_name} ({gpu_count} device(s))")
-                        self.log_message(f"   VRAM: {vram_gb:.1f} GB")
+                        self.log_message(f"✅ CUDA GPU: {gpu_name} ({gpu_count} device(s), {vram_gb:.1f} GB VRAM)")
                     else:
-                        self.log_message("⚠️ No CUDA GPU detected - will use CPU (slower)")
+                        self.log_message("ℹ️ No CUDA GPU detected - CPU training available (slower)")
                 except Exception as e:
-                    self.log_message(f"⚠️ GPU check failed: {e}")
+                    self.log_message(f"⚠️ GPU detection failed: {e}")
             
-            # Check for cancellation before disk check
+            # Phase 5: System Resources
             if self.system_check_cancelled:
+                self.log_message("⏹️ System check cancelled before resource check")
                 return
             
-            # Check disk space
-            self.log_message("💾 Checking disk space...")
+            self.log_message("� System Check Phase 5: System Resources")
             try:
+                # Check disk space
                 output_path = self.output_path.get()
                 if output_path and os.path.exists(os.path.dirname(output_path)):
                     stat = os.statvfs(os.path.dirname(output_path))
                     free_space_gb = (stat.f_frsize * stat.f_bavail) / (1024**3)
-                    self.log_message(f"✅ Available disk space: {free_space_gb:.1f} GB")
-                    
-                    if free_space_gb < 1:
-                        self.log_message("⚠️ Low disk space - recommend at least 1GB free")
+                    if free_space_gb >= 5:
+                        self.log_message(f"✅ Disk space: {free_space_gb:.1f} GB available")
+                    elif free_space_gb >= 1:
+                        self.log_message(f"⚠️ Disk space: {free_space_gb:.1f} GB available (recommend 5+ GB)")
+                    else:
+                        self.log_message(f"❌ Low disk space: {free_space_gb:.1f} GB available (need at least 1 GB)")
                 else:
-                    self.log_message("✅ Disk space check skipped (output path not set)")
-            except Exception as e:
-                self.log_message(f"⚠️ Disk space check failed: {e}")
+                    self.log_message("ℹ️ Disk space check skipped (output path not configured)")
+                    
+                # Check memory (basic)
+                import psutil
+                memory = psutil.virtual_memory()
+                memory_gb = memory.total / (1024**3)
+                available_gb = memory.available / (1024**3)
+                self.log_message(f"✅ System memory: {memory_gb:.1f} GB total, {available_gb:.1f} GB available")
                 
-            # Test model loading only if ML dependencies are available and not cancelled
+            except Exception as e:
+                self.log_message(f"⚠️ Resource check failed: {e}")
+            
+            # Phase 6: Model Loading Test (optional)
             if ML_DEPENDENCIES_AVAILABLE and not self.system_check_cancelled:
-                self.log_message("🤖 Testing model loading capability...")
+                self.log_message("🔍 System Check Phase 6: Model Loading Test")
                 try:
-                    # Quick test - just try to import the tokenizer class (no download)
+                    # Quick test - just try to import the tokenizer class (no network)
                     from transformers import AutoTokenizer
-                    self.log_message("✅ Model loading capability verified")
+                    self.log_message("✅ Model loading framework verified")
                 except Exception as e:
                     self.log_message(f"⚠️ Model loading test failed: {e}")
             
-            # Final cancellation check
+            # Final check
             if self.system_check_cancelled:
+                self.log_message("⏹️ System check cancelled before completion")
                 return
             
-            # All checks passed
-            self.log_message("🎉 System check completed successfully!")
+            # Success!
+            self.log_message("🎉 System Check Complete!")
             if ML_DEPENDENCIES_AVAILABLE:
-                self.log_message("✅ All components ready for training and testing")
+                self.log_message("🚀 Full functionality available - Training and testing ready")
             else:
-                self.log_message("✅ GUI ready in basic mode (install ML dependencies for full features)")
+                self.log_message("📋 Basic functionality available - Install ML dependencies for training")
+            
             self.system_check_passed()
             
         except Exception as e:
             if not self.system_check_cancelled:
-                self.log_message(f"❌ System check error: {str(e)}")
+                self.log_message(f"❌ System check failed: {str(e)}")
+                self.log_message("🔧 Try restarting the application or check your Python environment")
                 self.system_check_failed(f"System check error: {str(e)}")
         finally:
             self.system_check_running = False
+            self.log_message("🏁 System check thread finished")
             
     def system_check_passed(self):
         """Handle successful system check"""
@@ -1646,9 +1677,9 @@ class ModelTrainer:
         self.dependencies_checked = True
         
         # Update UI in main thread
-        self.root.after(0, self._enable_ui_after_check)
+        self.root.after(0, self._enable_ui_after_system_check)
         
-    def _enable_ui_after_check(self):
+    def _enable_ui_after_system_check(self):
         """Enable UI after successful system check (main thread)"""
         self.update_task_status("Ready - Configure settings and start training")
         self.enable_all_controls()
@@ -1676,35 +1707,27 @@ class ModelTrainer:
         self.log_message(f"❌ Please resolve the issues above and restart the application")
     
     def on_closing(self):
-        """Handle window close event - ensure app can always be closed"""
+        """Handle window close event - immediate shutdown"""
         try:
-            # Cancel any running system check
-            if self.system_check_running:
-                self.system_check_cancelled = True
-                self.log_message("🛑 Cancelling system check...")
+            self.log_message("� Closing application...")
             
-            # Wait briefly for system check to respond to cancellation
-            if self.system_check_running:
-                self.root.after(500, self._force_close)  # Force close after 500ms
-            else:
-                self._force_close()
-                
-        except Exception:
-            # If anything goes wrong, force close immediately
-            self._force_close()
-    
-    def _force_close(self):
-        """Force close the application"""
-        try:
-            # Stop any background threads
+            # Set cancellation flags immediately
+            self.system_check_cancelled = True
+            if hasattr(self, 'is_training'):
+                self.is_training = False
+            if hasattr(self, 'force_stop'):
+                self.force_stop = True
+            
+            # Cancel system check thread if running
             if hasattr(self, 'system_check_thread') and self.system_check_thread:
                 self.system_check_cancelled = True
             
-            # Destroy the window
+            # Destroy the window immediately - no waiting
             self.root.quit()
             self.root.destroy()
+            
         except Exception:
-            # Last resort - exit the process
+            # Last resort - exit the process immediately
             import sys
             sys.exit(0)
         
