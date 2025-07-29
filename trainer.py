@@ -959,7 +959,7 @@ class ModelTrainer:
         self.train_button = ttk.Button(self.training_buttons_frame, text="Start Training", command=self.start_training, state='disabled')
         self.train_button.pack(side='left', padx=5)
         
-        self.stop_button = ttk.Button(self.training_buttons_frame, text="Stop Training", command=self.stop_training, state='disabled')
+        self.stop_button = ttk.Button(self.training_buttons_frame, text="Stop", command=self.stop_training, state='disabled')
         self.stop_button.pack(side='left', padx=5)
         
         # Testing buttons
@@ -1729,6 +1729,16 @@ class ModelTrainer:
         if hasattr(self, 'status_label'):
             self.status_label.config(text=status_text, foreground='black')
             
+        # Track current operation for better stop feedback
+        if 'training' in status_text.lower():
+            self.current_operation = 'training'
+        elif 'export' in status_text.lower() or 'convert' in status_text.lower():
+            self.current_operation = 'export'
+        elif 'quantiz' in status_text.lower():
+            self.current_operation = 'quantization'
+        else:
+            self.current_operation = 'operation'
+            
     def update_task_status_error(self, error_text):
         """Update the task status label with error text in red color"""
         if hasattr(self, 'status_label'):
@@ -2104,14 +2114,18 @@ class ModelTrainer:
                 
             self.log_message(f"Output: {self.output_path.get()}")
             
-            # Create output directory structure with specified folder names
-            output_dir = Path(self.output_path.get())
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Create timestamped output directory structure
+            base_output_dir = Path(self.output_path.get())
+            base_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create timestamped session directory
+            timestamped_dir = self._create_timestamped_output_dir(base_output_dir)
+            self.log_message(f"📁 Session directory: {timestamped_dir.name}")
             
             # Create subdirectories for each step
-            train_dir = output_dir / "1_trained"
-            convert_dir = output_dir / "2_converted"
-            quantize_dir = output_dir / "3_quantized"
+            train_dir = timestamped_dir / "1_trained"
+            convert_dir = timestamped_dir / "2_converted"
+            quantize_dir = timestamped_dir / "3_quantized"
             
             if training_enabled:
                 # Step 1: Training
@@ -2151,7 +2165,7 @@ class ModelTrainer:
                     self.log_message("🎉 Training pipeline completed successfully!")
                 else:
                     self.log_message("🎉 Model conversion completed successfully!")
-                self.log_message(f"📁 All outputs saved to: {output_dir}")
+                self.log_message(f"📁 All outputs saved to: {timestamped_dir}")
             else:
                 self.log_message("⏹️ Training stopped by user")
                 
@@ -3741,9 +3755,23 @@ Choose based on your hardware and model size."""
             self.log_message("  Model files created, but manual testing recommended")
             
     def stop_training(self):
-        """Stop the training process"""
+        """Stop the current operation (training, ONNX conversion, or quantization)"""
         self.is_training = False
-        self.log_message("🛑 Stopping training...")
+        
+        # Determine what operation is being stopped based on current status
+        current_status = getattr(self, 'current_operation', 'operation')
+        
+        if 'training' in current_status.lower():
+            self.log_message("🛑 Training operation interrupted by user")
+        elif 'export' in current_status.lower() or 'convert' in current_status.lower():
+            self.log_message("🛑 ONNX conversion operation interrupted by user")
+        elif 'quantiz' in current_status.lower():
+            self.log_message("🛑 Quantization operation interrupted by user")
+        else:
+            self.log_message("🛑 Current operation interrupted by user")
+        
+        # Update UI immediately
+        self.update_task_status("Stopped by user - Ready for next task")
         
     def training_finished(self):
         """Clean up after training is finished"""
@@ -3766,12 +3794,25 @@ Choose based on your hardware and model size."""
             models = []
             
             if output_dir.exists():
-                # Find all 3_quantized directories
+                # Find all 3_quantized directories (now in timestamped folders)
                 for quantized_dir in output_dir.glob("**/3_quantized"):
                     if (quantized_dir / "model.onnx").exists():
-                        # Get parent directory name for display
+                        # Get timestamped parent directory name for display
                         parent_name = quantized_dir.parent.name
-                        models.append((str(quantized_dir), f"{parent_name}/3_quantized"))
+                        # Extract meaningful parts from the timestamped name
+                        # Format: yyyy_mm_dd_hh_mm_ss_modelName_actions
+                        parts = parent_name.split('_')
+                        if len(parts) >= 6:
+                            # Get date/time part
+                            date_part = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}:{parts[4]}:{parts[5]}"
+                            # Get model and action parts (everything after timestamp)
+                            remaining_parts = '_'.join(parts[6:])
+                            display_name = f"{date_part} - {remaining_parts}"
+                        else:
+                            # Fallback to simple parent name
+                            display_name = f"{parent_name}"
+                        
+                        models.append((str(quantized_dir), display_name))
                 
                 # Sort by modification time (newest first)
                 models.sort(key=lambda x: Path(x[0]).stat().st_mtime, reverse=True)
@@ -5043,6 +5084,43 @@ Choose based on your hardware and model size."""
         """Redirect test log to technical log window"""
         self.tech_log(message)
     
+    def _create_timestamped_output_dir(self, base_output_dir):
+        """Create a timestamped directory for the current training/conversion session"""
+        from datetime import datetime
+        import re
+        
+        # Get current timestamp
+        timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        
+        # Get short model name (clean up the model name for directory)
+        model_name = self.model_name.get()
+        # Extract just the model name part (after the last slash if it exists)
+        short_model_name = model_name.split('/')[-1] if '/' in model_name else model_name
+        # Clean up any special characters for directory name
+        short_model_name = re.sub(r'[^\w\-_]', '_', short_model_name)
+        # Limit length to keep directory names reasonable
+        if len(short_model_name) > 20:
+            short_model_name = short_model_name[:20]
+        
+        # Build action suffixes based on what operations are enabled
+        action_parts = []
+        if self.action_train.get():
+            action_parts.append("Training")
+        if self.action_export.get():
+            action_parts.append("Export")
+        if self.action_quantize.get():
+            action_parts.append("Quantization")
+        
+        # Create directory name
+        action_suffix = "_".join(action_parts) if action_parts else "NoAction"
+        dir_name = f"{timestamp}_{short_model_name}_{action_suffix}"
+        
+        # Create the timestamped directory
+        timestamped_dir = base_output_dir / dir_name
+        timestamped_dir.mkdir(parents=True, exist_ok=True)
+        
+        return timestamped_dir
+    
     def log_message(self, message):
         """Add a message to the log"""
         timestamp = time.strftime("%H:%M:%S")
@@ -5256,12 +5334,26 @@ Choose based on your hardware and model size."""
             output_dir = Path(self.output_path.get())
             models = []
             
-            # Look for ONNX models in subdirectories
-            for subdir in ['2_converted', '3_quantized']:
-                model_dir = output_dir / subdir
-                if model_dir.exists() and (model_dir / 'model.onnx').exists():
-                    models.append(f"{subdir} - {model_dir}")
-                    self.model_paths[subdir] = str(model_dir)
+            # Look for ONNX models in timestamped subdirectories
+            for timestamped_dir in output_dir.glob("*"):
+                if timestamped_dir.is_dir():
+                    # Check for converted and quantized models in this timestamped directory
+                    for subdir in ['2_converted', '3_quantized']:
+                        model_dir = timestamped_dir / subdir
+                        if model_dir.exists() and (model_dir / 'model.onnx').exists():
+                            # Create readable display name
+                            session_name = timestamped_dir.name
+                            # Extract meaningful parts from the timestamped name
+                            parts = session_name.split('_')
+                            if len(parts) >= 6:
+                                date_part = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}:{parts[4]}:{parts[5]}"
+                                remaining_parts = '_'.join(parts[6:])
+                                display_name = f"{date_part} - {remaining_parts} - {subdir}"
+                            else:
+                                display_name = f"{session_name} - {subdir}"
+                            
+                            models.append(display_name)
+                            self.model_paths[display_name] = str(model_dir)
             
             # Update combobox
             self.model_list_combo['values'] = list(self.model_paths.keys()) if models else ["No models found"]
