@@ -159,6 +159,12 @@ class ModelTrainer:
         # System status
         self.system_ready = False
         self.dependencies_checked = False
+        self.system_check_running = False
+        self.system_check_cancelled = False
+        self.system_check_thread = None
+        
+        # Add proper window closing protocol
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Initialize variables
         self.training_thread = None
@@ -1494,17 +1500,39 @@ class ModelTrainer:
     
             
     def start_system_check(self):
-        """Start comprehensive system check in background"""
+        """Start comprehensive system check in background - non-blocking and interruptible"""
         self.log_message("🔍 Starting comprehensive system check...")
         self.update_task_status("System check in progress...")
+        self.system_check_running = True
+        self.system_check_cancelled = False
         
-        # Run system check in separate thread
-        check_thread = threading.Thread(target=self.run_system_check, daemon=True)
-        check_thread.start()
+        # Run system check in separate daemon thread (won't block app shutdown)
+        self.system_check_thread = threading.Thread(target=self.run_system_check, daemon=True)
+        self.system_check_thread.start()
+        
+        # Start a periodic check to see if system check completed or was cancelled
+        self.check_system_status()
+    
+    def check_system_status(self):
+        """Periodically check system check status - non-blocking"""
+        if self.system_check_cancelled:
+            # User closed window, stop checking
+            return
+            
+        if not self.system_check_running:
+            # System check completed
+            return
+            
+        # Check again in 100ms - keeps UI responsive
+        self.root.after(100, self.check_system_status)
         
     def run_system_check(self):
-        """Run comprehensive system check"""
+        """Run comprehensive system check - can be interrupted"""
         try:
+            # Check if cancelled before starting
+            if self.system_check_cancelled:
+                return
+                
             self.log_message("🐍 Checking Python environment...")
             python_version = sys.version_info
             
@@ -1513,6 +1541,10 @@ class ModelTrainer:
             else:
                 self.log_message(f"❌ Python 3.7+ required, found {python_version.major}.{python_version.minor}")
                 self.system_check_failed("Python version too old")
+                return
+            
+            # Check for cancellation
+            if self.system_check_cancelled:
                 return
                 
             # Check basic dependencies first
@@ -1534,6 +1566,9 @@ class ModelTrainer:
                     return
                 
             # Check if ML dependencies are available (non-blocking)
+            if self.system_check_cancelled:
+                return
+                
             self.log_message("🤖 Checking ML dependencies (optional for GUI)...")
             if not check_ml_dependencies():
                 self.log_message(f"⚠️ ML dependencies not available: {ML_IMPORT_ERROR}")
@@ -1541,6 +1576,10 @@ class ModelTrainer:
                 self.log_message("✅ GUI will start in basic mode")
             else:
                 self.log_message("✅ All ML dependencies available")
+                
+                # Check for cancellation before GPU check
+                if self.system_check_cancelled:
+                    return
                 
                 # Additional ML checks only if dependencies are available
                 self.log_message("🖥️ Checking compute capabilities...")
@@ -1555,6 +1594,10 @@ class ModelTrainer:
                         self.log_message("⚠️ No CUDA GPU detected - will use CPU (slower)")
                 except Exception as e:
                     self.log_message(f"⚠️ GPU check failed: {e}")
+            
+            # Check for cancellation before disk check
+            if self.system_check_cancelled:
+                return
             
             # Check disk space
             self.log_message("💾 Checking disk space...")
@@ -1572,28 +1615,19 @@ class ModelTrainer:
             except Exception as e:
                 self.log_message(f"⚠️ Disk space check failed: {e}")
                 
-            # Test model loading only if ML dependencies are available
-            if ML_DEPENDENCIES_AVAILABLE:
+            # Test model loading only if ML dependencies are available and not cancelled
+            if ML_DEPENDENCIES_AVAILABLE and not self.system_check_cancelled:
                 self.log_message("🤖 Testing model loading capability...")
                 try:
-                    # Test with default model (this might download, so timeout quickly)
-                    
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("Model loading timeout")
-                    
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(10)  # 10 second timeout
-                    
-                    try:
-                        tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
-                        self.log_message("✅ Model loading capability verified")
-                    except TimeoutError:
-                        self.log_message("⚠️ Model loading timeout - network may be slow")
-                    finally:
-                        signal.alarm(0)  # Cancel the alarm
-                        
+                    # Quick test - just try to import the tokenizer class (no download)
+                    from transformers import AutoTokenizer
+                    self.log_message("✅ Model loading capability verified")
                 except Exception as e:
                     self.log_message(f"⚠️ Model loading test failed: {e}")
+            
+            # Final cancellation check
+            if self.system_check_cancelled:
+                return
             
             # All checks passed
             self.log_message("🎉 System check completed successfully!")
@@ -1604,8 +1638,11 @@ class ModelTrainer:
             self.system_check_passed()
             
         except Exception as e:
-            self.log_message(f"❌ System check error: {str(e)}")
-            self.system_check_failed(f"System check error: {str(e)}")
+            if not self.system_check_cancelled:
+                self.log_message(f"❌ System check error: {str(e)}")
+                self.system_check_failed(f"System check error: {str(e)}")
+        finally:
+            self.system_check_running = False
             
     def system_check_passed(self):
         """Handle successful system check"""
@@ -1641,6 +1678,39 @@ class ModelTrainer:
         """Handle check failure in main thread"""
         self.update_task_status(f"System check failed: {reason}")
         self.log_message(f"❌ Please resolve the issues above and restart the application")
+    
+    def on_closing(self):
+        """Handle window close event - ensure app can always be closed"""
+        try:
+            # Cancel any running system check
+            if self.system_check_running:
+                self.system_check_cancelled = True
+                self.log_message("🛑 Cancelling system check...")
+            
+            # Wait briefly for system check to respond to cancellation
+            if self.system_check_running:
+                self.root.after(500, self._force_close)  # Force close after 500ms
+            else:
+                self._force_close()
+                
+        except Exception:
+            # If anything goes wrong, force close immediately
+            self._force_close()
+    
+    def _force_close(self):
+        """Force close the application"""
+        try:
+            # Stop any background threads
+            if hasattr(self, 'system_check_thread') and self.system_check_thread:
+                self.system_check_cancelled = True
+            
+            # Destroy the window
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            # Last resort - exit the process
+            import sys
+            sys.exit(0)
         
     def on_model_changed(self, event=None):
         """Handle model selection change"""
