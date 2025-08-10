@@ -785,7 +785,7 @@ class ModelTrainer:
         quick_select_frame.pack(fill='x', padx=5, pady=(0, 5))
         
         ttk.Label(quick_select_frame, text="Quick Select:").pack(side='left')
-        self.refresh_models_button = ttk.Button(quick_select_frame, text="Refresh", command=self.refresh_model_list, width=8)
+        self.refresh_models_button = ttk.Button(quick_select_frame, text="Refresh", command=self.refresh_model_list_with_feedback, width=8)
         self.refresh_models_button.pack(side='right')
         
         self.model_list_combo = ttk.Combobox(quick_select_frame, width=20, state='readonly')
@@ -4116,11 +4116,15 @@ Choose based on your hardware and model size."""
         # Restore original training device display
         self.update_training_device_display("auto")
     
-    def refresh_model_list(self):
-        """Refresh the list of available ONNX models"""
+    def refresh_quantized_model_list(self):
+        """Refresh the list of available quantized ONNX models (legacy method)"""
         try:
             output_dir = Path("./output")
             models = []
+            
+            # Clear existing model paths
+            if not hasattr(self, 'model_paths'):
+                self.model_paths = {}
             
             if output_dir.exists():
                 # Find all 3_quantized directories (now in session folders)
@@ -4136,19 +4140,26 @@ Choose based on your hardware and model size."""
                 # Sort by modification time (newest first)
                 models.sort(key=lambda x: Path(x[0]).stat().st_mtime, reverse=True)
             
-            # Update combobox
-            self.model_list_combo['values'] = [display_name for _, display_name in models]
-            self.model_paths = {display_name: path for path, display_name in models}
-            
-            if models:
-                # Select the most recent model
-                self.model_list_combo.set(models[0][1])
-                self.model_path_var.set(models[0][0])
-                self.generate_button.config(state='normal')
-            else:
-                self.model_list_combo.set("")
-                self.model_path_var.set("")
-                self.generate_button.config(state='disabled')
+            # Update combobox if it exists
+            if hasattr(self, 'model_list_combo'):
+                self.model_list_combo['values'] = [display_name for _, display_name in models]
+                self.model_paths = {display_name: path for path, display_name in models}
+                
+                if models:
+                    # Select the most recent model
+                    self.model_list_combo.set(models[0][1])
+                    self.model_path_var.set(models[0][0])
+                    if hasattr(self, 'generate_button'):
+                        self.generate_button.config(state='normal')
+                else:
+                    self.model_list_combo.set("")
+                    self.model_path_var.set("")
+                    if hasattr(self, 'generate_button'):
+                        self.generate_button.config(state='disabled')
+                        
+        except Exception as e:
+            if hasattr(self, 'tech_log'):
+                self.tech_log(f"❌ Error refreshing quantized model list: {e}")
                 
         except Exception as e:
             self.tech_log(f"❌ Error refreshing model list: {e}")
@@ -5638,36 +5649,79 @@ Choose based on your hardware and model size."""
         if dirname:
             self.model_path_var.set(dirname)
     
+    def refresh_model_list_with_feedback(self):
+        """Refresh model list with user feedback"""
+        try:
+            # Provide immediate feedback to user
+            original_text = self.refresh_models_button.config('text')[-1]
+            self.refresh_models_button.config(text="Refreshing...", state='disabled')
+            self.tech_log("🔄 Refreshing model list...")
+            
+            # Force UI update
+            self.root.update_idletasks()
+            
+            # Call the actual refresh method
+            self.refresh_model_list()
+            
+            # Update memory usage display since model might have changed
+            if hasattr(self, 'update_memory_usage_display'):
+                self.update_memory_usage_display()
+            
+        except Exception as e:
+            self.tech_log(f"❌ Error during model refresh: {e}")
+        finally:
+            # Restore button state
+            self.refresh_models_button.config(text=original_text, state='normal')
+            self.tech_log("✅ Model list refresh complete")
+
     def refresh_model_list(self):
         """Refresh the list of available models from output directory"""
         try:
             output_dir = Path(self.output_path.get())
             models = []
             
+            # Clear existing model paths to ensure deleted models are removed
+            self.model_paths = {}
+            
             # Look for ONNX models in session subdirectories
-            for session_dir in output_dir.glob("*"):
-                if session_dir.is_dir():
-                    # Check for converted and quantized models in this session directory
-                    for subdir in ['2_converted', '3_quantized']:
-                        model_dir = session_dir / subdir
-                        if model_dir.exists() and (model_dir / 'model.onnx').exists():
-                            # Create readable display name
-                            session_name = session_dir.name
-                            # Use the session name directly (e.g., DialoGPT-small, DialoGPT-small_2)
-                            model_type = "Quantized" if subdir == '3_quantized' else "Standard"
-                            display_name = f"{session_name} ({model_type})"
-                            
-                            models.append(display_name)
-                            self.model_paths[display_name] = str(model_dir)
+            if output_dir.exists():
+                for session_dir in output_dir.glob("*"):
+                    if session_dir.is_dir():
+                        # Check for converted and quantized models in this session directory
+                        for subdir in ['2_converted', '3_quantized']:
+                            model_dir = session_dir / subdir
+                            if model_dir.exists() and (model_dir / 'model.onnx').exists():
+                                # Create readable display name
+                                session_name = session_dir.name
+                                # Use the session name directly (e.g., DialoGPT-small, DialoGPT-small_2)
+                                model_type = "Quantized" if subdir == '3_quantized' else "Standard"
+                                display_name = f"{session_name} ({model_type})"
+                                
+                                models.append(display_name)
+                                self.model_paths[display_name] = str(model_dir)
             
-            # Update combobox
-            self.model_list_combo['values'] = list(self.model_paths.keys()) if models else ["No models found"]
-            
+            # Update combobox values
             if models:
-                self.model_list_combo.set(list(self.model_paths.keys())[0])
-                self.model_path_var.set(list(self.model_paths.values())[0])
+                self.model_list_combo['values'] = models
+                # Set first available model as selected
+                self.model_list_combo.set(models[0])
+                self.model_path_var.set(self.model_paths[models[0]])
+                self.generate_button.config(state='normal')
+                self.tech_log(f"✅ Found {len(models)} model(s): {', '.join(models)}")
+            else:
+                self.model_list_combo['values'] = ["No models found"]
+                self.model_list_combo.set("No models found")
+                self.model_path_var.set("")
+                self.generate_button.config(state='disabled')
+                self.tech_log("⚠️ No ONNX models found in output directory")
                 
         except Exception as e:
+            self.tech_log(f"❌ Error refreshing model list: {e}")
+            # Ensure UI is in a consistent state even on error
+            self.model_list_combo['values'] = ["Error loading models"]
+            self.model_list_combo.set("Error loading models")
+            self.model_path_var.set("")
+            self.generate_button.config(state='disabled')
             self.tech_log(f"⚠️ Error refreshing model list: {e}")
     
     def test_log(self, message):
