@@ -570,6 +570,10 @@ class ModelTrainer:
         self.model_combo.grid(row=0, column=1, sticky='ew', padx=5, pady=5)
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_changed)
         
+        # Cache status indicator
+        self.cache_status_label = ttk.Label(model_frame, text="", font=('TkDefaultFont', 8))
+        self.cache_status_label.grid(row=0, column=2, sticky='w', padx=5, pady=5)
+        
         ttk.Label(model_frame, text="Output Directory:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
         output_frame = ttk.Frame(model_frame)
         output_frame.grid(row=1, column=1, sticky='ew', padx=5, pady=5)
@@ -758,7 +762,7 @@ class ModelTrainer:
         self.clear_button.pack(side='left', padx=5)
         self.save_button = ttk.Button(log_controls, text="Save Logs", command=self.save_logs, state='disabled')
         self.save_button.pack(side='left', padx=5)
-        self.test_download_button = ttk.Button(log_controls, text="Test Download", command=self.test_download_progress, state='disabled')
+        self.test_download_button = ttk.Button(log_controls, text="Test cached models", command=self.test_cached_models, state='disabled')
         self.test_download_button.pack(side='left', padx=5)
         
     def setup_testing_settings(self, parent):
@@ -1696,6 +1700,7 @@ class ModelTrainer:
         
         # Update model info for default selection
         self.update_model_info()
+        self.update_cache_status_display()
         
         # Validate training configuration on startup
         self.validate_training_configuration()
@@ -1741,6 +1746,7 @@ class ModelTrainer:
         """Handle model selection change"""
         if self.system_ready:
             self.update_model_info()
+            self.update_cache_status_display()
             
             # Update memory usage displays in both tabs to reflect new model size
             if hasattr(self, 'update_train_memory_usage_display'):
@@ -1884,7 +1890,88 @@ class ModelTrainer:
         # Make sure action_train is in sync with enable_training
         self.action_train.set(self.enable_training.get())
             
-    def update_model_info(self):
+    def check_model_cache_status(self, model_name):
+        """Check if a model is cached and return cache status info"""
+        try:
+            # Use global file_utils import
+            cache_dir = file_utils.default_cache_path
+            
+            if not cache_dir or not os.path.exists(cache_dir):
+                return False, "Unknown", 0
+            
+            # Convert model name to cache directory format
+            cache_model_name = f"models--{model_name.replace('/', '--')}"
+            cached_path = os.path.join(cache_dir, cache_model_name)
+            
+            if os.path.exists(cached_path):
+                # Check if all necessary files are present
+                refs_dir = os.path.join(cached_path, "refs")
+                snapshots_dir = os.path.join(cached_path, "snapshots")
+                
+                if os.path.exists(refs_dir) and os.path.exists(snapshots_dir):
+                    # Check if there are actual model files in snapshots
+                    has_model_files = False
+                    total_size = 0
+                    
+                    for snapshot_dir in os.listdir(snapshots_dir):
+                        snapshot_path = os.path.join(snapshots_dir, snapshot_dir)
+                        if os.path.isdir(snapshot_path):
+                            files = os.listdir(snapshot_path)
+                            # Look for model files
+                            if any(f.endswith(('.bin', '.safetensors', '.json')) for f in files):
+                                has_model_files = True
+                                # Calculate directory size
+                                for file in files:
+                                    file_path = os.path.join(snapshot_path, file)
+                                    if os.path.isfile(file_path):
+                                        total_size += os.path.getsize(file_path)
+                    
+                    if has_model_files:
+                        # Convert bytes to MB/GB
+                        if total_size > 1024 * 1024 * 1024:  # > 1GB
+                            size_str = f"{total_size / (1024*1024*1024):.1f}GB"
+                        elif total_size > 1024 * 1024:  # > 1MB
+                            size_str = f"{total_size / (1024*1024):.1f}MB"
+                        else:
+                            size_str = f"{total_size / 1024:.1f}KB"
+                        
+                        return True, size_str, total_size
+            
+            return False, "Unknown", 0
+            
+        except Exception as e:
+            return False, f"Error: {str(e)}", 0
+
+    def update_cache_status_display(self):
+        """Update the cache status display for the currently selected model"""
+        try:
+            if not hasattr(self, 'cache_status_label'):
+                return
+                
+            model_name = self.model_name.get()
+            if not model_name:
+                self.cache_status_label.config(text="", foreground='black')
+                return
+            
+            is_cached, size_info, _ = self.check_model_cache_status(model_name)
+            
+            if is_cached:
+                status_text = f"✅ Model cached ({size_info})"
+                color = '#008000'  # Green
+            else:
+                # Try to estimate size from model info database
+                if model_name in self.model_info_db:
+                    estimated_size = self.model_info_db[model_name].get('size_pytorch', 'Unknown')
+                    status_text = f"⬇️ Model will be downloaded (~{estimated_size})"
+                else:
+                    status_text = "⬇️ Model will be downloaded"
+                color = '#800000'  # Red
+            
+            self.cache_status_label.config(text=status_text, foreground=color)
+            
+        except Exception as e:
+            if hasattr(self, 'cache_status_label'):
+                self.cache_status_label.config(text="❌ Cache check error", foreground='red')
         """Update model information based on current selections"""
         if not self.system_ready:
             return
@@ -3614,50 +3701,84 @@ Choose based on your hardware and model size."""
         # Most hardware detection is handled by update_device_options()
         self.update_device_options()
     
-    def test_download_progress(self):
-        """Test download progress tracking - shows cache status and recommendations"""
-        self.log_message("🧪 Testing download progress tracking...")
-        self.log_message("💡 To see download progress, select a model that's not cached")
+    def test_cached_models(self):
+        """Display detailed information about cached and non-cached models"""
+        self.log_message("🔍 Checking model cache status...")
         
-        # List of small models that are good for testing
-        test_models = [
-            "distilgpt2",
-            "gpt2", 
-            "microsoft/DialoGPT-small",
-            "facebook/opt-125m"
-        ]
+        # Get list of models available in the trainer
+        available_models = list(self.model_info_db.keys())
         
-        self.log_message(f"📝 Recommended test models: {', '.join(test_models)}")
-        self.log_message("🔧 To force a download test:")
-        self.log_message("   1. Select a model you haven't used before")
-        self.log_message("   2. Or clear the HuggingFace cache: ~/.cache/huggingface/")
+        cached_models = []
+        non_cached_models = []
         
-        # Check current cache status
-        try:
-            # Use global file_utils import
-            cache_dir = file_utils.default_cache_path
-            self.log_message(f"📁 Current cache directory: {cache_dir}")
+        self.log_message(f"📋 Scanning cache for {len(available_models)} available models...")
+        
+        # Check each model
+        for model in available_models:
+            is_cached, size_info, total_size = self.check_model_cache_status(model)
             
-            if os.path.exists(cache_dir):
-                cached_models = []
-                for item in os.listdir(cache_dir):
-                    if item.startswith("models--"):
-                        model_name = item.replace("models--", "").replace("--", "/")
-                        cached_models.append(model_name)
-                
-                if cached_models:
-                    self.log_message(f"💾 Currently cached models: {', '.join(cached_models[:5])}")
-                    if len(cached_models) > 5:
-                        self.log_message(f"   ... and {len(cached_models) - 5} more")
-                else:
-                    self.log_message("💾 No models currently cached")
+            if is_cached:
+                cached_models.append((model, size_info, total_size))
             else:
-                self.log_message("💾 Cache directory doesn't exist yet")
-                
-        except Exception as e:
-            self.log_message(f"⚠️ Could not check cache status: {e}")
+                # Get estimated download size from database
+                estimated_size = self.model_info_db[model].get('size_pytorch', 'Unknown size')
+                non_cached_models.append((model, estimated_size))
+        
+        # Display results
+        self.log_message("\n" + "="*60)
+        self.log_message("📊 MODEL CACHE ANALYSIS REPORT")
+        self.log_message("="*60)
+        
+        # Show cached models
+        if cached_models:
+            self.log_message(f"\n✅ CACHED MODELS ({len(cached_models)} found):")
+            self.log_message("-" * 40)
             
-        self.log_message("✅ Download test information complete")
+            # Sort by size (largest first)
+            cached_models.sort(key=lambda x: x[2], reverse=True)
+            
+            total_cache_size = 0
+            for model, size_info, total_size in cached_models:
+                self.log_message(f"   📦 {model} ({size_info})")
+                total_cache_size += total_size
+            
+            # Show total cache size
+            if total_cache_size > 1024 * 1024 * 1024:  # > 1GB
+                total_size_str = f"{total_cache_size / (1024*1024*1024):.1f}GB"
+            elif total_cache_size > 1024 * 1024:  # > 1MB
+                total_size_str = f"{total_cache_size / (1024*1024):.1f}MB"
+            else:
+                total_size_str = f"{total_cache_size / 1024:.1f}KB"
+                
+            self.log_message(f"\n💾 Total cache size: {total_size_str}")
+        else:
+            self.log_message("\n✅ CACHED MODELS: None found")
+        
+        # Show non-cached models
+        if non_cached_models:
+            self.log_message(f"\n⬇️  MODELS NOT CACHED ({len(non_cached_models)} found):")
+            self.log_message("-" * 40)
+            
+            for model, estimated_size in non_cached_models:
+                self.log_message(f"   � {model} (estimated: {estimated_size})")
+        else:
+            self.log_message("\n⬇️  MODELS NOT CACHED: All test models are cached!")
+        
+        # Show cache location and tips
+        try:
+            cache_dir = file_utils.default_cache_path
+            self.log_message(f"\n📁 Cache location: {cache_dir}")
+        except:
+            self.log_message("\n📁 Cache location: ~/.cache/huggingface/")
+        
+        self.log_message("\n💡 TIPS:")
+        self.log_message("   • Cached models load instantly")
+        self.log_message("   • Non-cached models will be downloaded on first use")
+        self.log_message("   • Clear cache to test download progress")
+        self.log_message("   • Smaller models (distilgpt2, gpt2) download faster than larger ones")
+        
+        self.log_message("\n✅ Cache analysis complete!")
+            
             
     def load_and_format_dataset(self):
         """Load and format the dataset from JSON file"""
