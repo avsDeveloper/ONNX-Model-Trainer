@@ -2238,18 +2238,18 @@ class ModelTrainer:
                 
             self.log_message(f"Output: {self.output_path.get()}")
             
-            # Create timestamped output directory structure
+            # Create session directory structure
             base_output_dir = Path(self.output_path.get())
             base_output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Create timestamped session directory
-            timestamped_dir = self._create_timestamped_output_dir(base_output_dir)
-            self.log_message(f"📁 Session directory: {timestamped_dir.name}")
+            # Create session directory with simple naming
+            session_dir = self._create_session_output_dir(base_output_dir)
+            self.log_message(f"📁 Session directory: {session_dir.name}")
             
             # Create subdirectories for each step
-            train_dir = timestamped_dir / "1_trained"
-            convert_dir = timestamped_dir / "2_converted"
-            quantize_dir = timestamped_dir / "3_quantized"
+            train_dir = session_dir / "1_trained"
+            convert_dir = session_dir / "2_converted"
+            quantize_dir = session_dir / "3_quantized"
             
             if training_enabled:
                 # Step 1: Training
@@ -2320,7 +2320,7 @@ class ModelTrainer:
                     self.log_message("🎉 Training pipeline completed successfully!")
                 else:
                     self.log_message("🎉 Model conversion completed successfully!")
-                self.log_message(f"📁 All outputs saved to: {timestamped_dir}")
+                self.log_message(f"📁 All outputs saved to: {session_dir}")
             else:
                 self.log_message("⏹️ Training stopped by user")
                 
@@ -4123,23 +4123,13 @@ Choose based on your hardware and model size."""
             models = []
             
             if output_dir.exists():
-                # Find all 3_quantized directories (now in timestamped folders)
+                # Find all 3_quantized directories (now in session folders)
                 for quantized_dir in output_dir.glob("**/3_quantized"):
                     if (quantized_dir / "model.onnx").exists():
-                        # Get timestamped parent directory name for display
+                        # Get session parent directory name for display
                         parent_name = quantized_dir.parent.name
-                        # Extract meaningful parts from the timestamped name
-                        # Format: yyyy_mm_dd_hh_mm_ss_modelName_actions
-                        parts = parent_name.split('_')
-                        if len(parts) >= 6:
-                            # Get date/time part
-                            date_part = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}:{parts[4]}:{parts[5]}"
-                            # Get model and action parts (everything after timestamp)
-                            remaining_parts = '_'.join(parts[6:])
-                            display_name = f"{date_part} - {remaining_parts}"
-                        else:
-                            # Fallback to simple parent name
-                            display_name = f"{parent_name}"
+                        # Use the session name directly (e.g., DialoGPT-small, DialoGPT-small_2)
+                        display_name = f"{parent_name} (Quantized)"
                         
                         models.append((str(quantized_dir), display_name))
                 
@@ -5413,12 +5403,8 @@ Choose based on your hardware and model size."""
         """Redirect test log to technical log window"""
         self.tech_log(message)
     
-    def _create_timestamped_output_dir(self, base_output_dir):
-        """Create a timestamped directory for the current training/conversion session"""
-        from datetime import datetime
-        # Get current timestamp
-        timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        
+    def _create_session_output_dir(self, base_output_dir):
+        """Create a simple directory for the current training/conversion session"""
         # Get short model name (clean up the model name for directory)
         model_name = self.model_name.get()
         # Extract just the model name part (after the last slash if it exists)
@@ -5426,27 +5412,24 @@ Choose based on your hardware and model size."""
         # Clean up any special characters for directory name
         short_model_name = re.sub(r'[^\w\-_]', '_', short_model_name)
         # Limit length to keep directory names reasonable
-        if len(short_model_name) > 20:
-            short_model_name = short_model_name[:20]
+        if len(short_model_name) > 30:
+            short_model_name = short_model_name[:30]
         
-        # Build action suffixes based on what operations are enabled
-        action_parts = []
-        if self.action_train.get():
-            action_parts.append("Training")
-        if self.action_export.get():
-            action_parts.append("Export")
-        if self.action_quantize.get():
-            action_parts.append("Quantization")
+        # Start with the base model name
+        dir_name = short_model_name
+        target_dir = base_output_dir / dir_name
         
-        # Create directory name
-        action_suffix = "_".join(action_parts) if action_parts else "NoAction"
-        dir_name = f"{timestamp}_{short_model_name}_{action_suffix}"
+        # If directory exists, find next available number
+        counter = 2
+        while target_dir.exists():
+            dir_name = f"{short_model_name}_{counter}"
+            target_dir = base_output_dir / dir_name
+            counter += 1
         
-        # Create the timestamped directory
-        timestamped_dir = base_output_dir / dir_name
-        timestamped_dir.mkdir(parents=True, exist_ok=True)
+        # Create the directory
+        target_dir.mkdir(parents=True, exist_ok=True)
         
-        return timestamped_dir
+        return target_dir
     
     def log_message(self, message):
         """Add a message to the log"""
@@ -5661,23 +5644,18 @@ Choose based on your hardware and model size."""
             output_dir = Path(self.output_path.get())
             models = []
             
-            # Look for ONNX models in timestamped subdirectories
-            for timestamped_dir in output_dir.glob("*"):
-                if timestamped_dir.is_dir():
-                    # Check for converted and quantized models in this timestamped directory
+            # Look for ONNX models in session subdirectories
+            for session_dir in output_dir.glob("*"):
+                if session_dir.is_dir():
+                    # Check for converted and quantized models in this session directory
                     for subdir in ['2_converted', '3_quantized']:
-                        model_dir = timestamped_dir / subdir
+                        model_dir = session_dir / subdir
                         if model_dir.exists() and (model_dir / 'model.onnx').exists():
                             # Create readable display name
-                            session_name = timestamped_dir.name
-                            # Extract meaningful parts from the timestamped name
-                            parts = session_name.split('_')
-                            if len(parts) >= 6:
-                                date_part = f"{parts[0]}-{parts[1]}-{parts[2]} {parts[3]}:{parts[4]}:{parts[5]}"
-                                remaining_parts = '_'.join(parts[6:])
-                                display_name = f"{date_part} - {remaining_parts} - {subdir}"
-                            else:
-                                display_name = f"{session_name} - {subdir}"
+                            session_name = session_dir.name
+                            # Use the session name directly (e.g., DialoGPT-small, DialoGPT-small_2)
+                            model_type = "Quantized" if subdir == '3_quantized' else "Standard"
+                            display_name = f"{session_name} ({model_type})"
                             
                             models.append(display_name)
                             self.model_paths[display_name] = str(model_dir)
