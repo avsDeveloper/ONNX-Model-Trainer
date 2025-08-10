@@ -1972,6 +1972,8 @@ class ModelTrainer:
         except Exception as e:
             if hasattr(self, 'cache_status_label'):
                 self.cache_status_label.config(text="❌ Cache check error", foreground='red')
+
+    def update_model_info(self):
         """Update model information based on current selections"""
         if not self.system_ready:
             return
