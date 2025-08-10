@@ -2410,6 +2410,7 @@ class ModelTrainer:
                     self.trainer_ui = trainer_ui
                     self.total_epochs = trainer_ui.epochs.get()
                     self.current_epoch = 0
+                    self.steps_per_epoch = None
                     
                 def on_epoch_begin(self, args, state, control, **kwargs):
                     # Check for stop signal
@@ -2418,7 +2419,13 @@ class ModelTrainer:
                         control.should_training_stop = True
                         return control
                         
-                    self.current_epoch = state.epoch + 1
+                    # Update current epoch (state.epoch starts from 0, but we want to display 1-based)
+                    self.current_epoch = int(state.epoch) + 1
+                    
+                    # Calculate steps per epoch for accurate percentage calculation
+                    if state.max_steps > 0 and self.total_epochs > 0:
+                        self.steps_per_epoch = state.max_steps // self.total_epochs
+                    
                     self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
                         self.current_epoch, self.total_epochs, 0, 0, 0
                     ))
@@ -2430,11 +2437,22 @@ class ModelTrainer:
                         control.should_training_stop = True
                         return control
                         
-                    if state.max_steps > 0:
-                        step_percent = int((state.global_step / state.max_steps) * 100)
-                        self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
-                            self.current_epoch, self.total_epochs, step_percent, 0, 0
-                        ))
+                    # Calculate current epoch completion percentage
+                    if self.steps_per_epoch and self.steps_per_epoch > 0:
+                        # Calculate steps completed in current epoch
+                        steps_in_current_epoch = state.global_step % self.steps_per_epoch
+                        if steps_in_current_epoch == 0 and state.global_step > 0:
+                            # Handle case where we're exactly at epoch boundary
+                            steps_in_current_epoch = self.steps_per_epoch
+                        epoch_percent = int((steps_in_current_epoch / self.steps_per_epoch) * 100)
+                        epoch_percent = min(100, max(0, epoch_percent))  # Clamp between 0-100
+                    else:
+                        # Fallback: use overall progress if we can't calculate epoch progress
+                        epoch_percent = int((state.global_step / state.max_steps) * 100) if state.max_steps > 0 else 0
+                        
+                    self.trainer_ui.root.after(0, lambda: self.trainer_ui.set_training_progress(
+                        self.current_epoch, self.total_epochs, epoch_percent, 0, 0
+                    ))
                         
                 def on_epoch_end(self, args, state, control, **kwargs):
                     # Check for stop signal
