@@ -216,6 +216,9 @@ class ModelTrainer:
         # Device selection for training, export, and quantization
         self.user_selected_device = None  # Will be set by device detection
         
+        # Memory sufficiency tracking
+        self.memory_sufficient_for_training = True  # Default to true until checked
+        
         # Model information database
         self.model_info_db = {
             "distilgpt2": {
@@ -1751,6 +1754,12 @@ class ModelTrainer:
             # Small delay to allow the widget to update
             self.root.after(100, self.update_model_info)
             
+            # Also update memory displays since batch size affects memory requirements
+            self.root.after(200, lambda: (
+                self.update_train_memory_usage_display() if hasattr(self, 'update_train_memory_usage_display') else None,
+                self.update_memory_usage_display() if hasattr(self, 'update_memory_usage_display') else None
+            ))
+            
     def update_task_status(self, status_text):
         """Update the task status label with normal text"""
         if hasattr(self, 'status_label'):
@@ -1784,25 +1793,30 @@ class ModelTrainer:
         except:
             # If there's any issue getting tab info, skip validation
             return True
-            
+        
+        # Update training button state which handles all validation logic
+        self.update_training_button_state()
+        
+        # Also update status message if needed
         training_enabled = self.enable_training.get()
-        if not training_enabled:
-            # Clear any training validation errors when training is disabled
-            self.update_task_status("Ready - Configure settings and export model")
-            return True  # No validation needed if training is disabled
-            
-        # Check for missing required fields
         dataset_path = self.dataset_path.get().strip()
         output_path = self.output_path.get().strip()
+        memory_sufficient = getattr(self, 'memory_sufficient_for_training', True)
         
-        if not dataset_path:
-            self.update_task_status_error("Dataset file not selected - Please browse and select a dataset file")
+        if not training_enabled:
+            self.update_task_status("Ready - Configure settings and export model")
+            return True
+        elif not dataset_path:
+            # Status already updated by update_training_button_state
             return False
         elif not output_path:
-            self.update_task_status_error("Output directory not selected - Please browse and select an output directory")
+            # Status already updated by update_training_button_state  
+            return False
+        elif not memory_sufficient:
+            # Status already updated by update_training_button_state
             return False
         else:
-            # Configuration is valid, restore normal status
+            # Configuration is valid
             self.update_task_status("Ready - Configure settings and start training")
             return True
             
@@ -2003,6 +2017,88 @@ class ModelTrainer:
                 return f"{memory_gb:.1f} ({precision})"
         except Exception as e:
             return f"Unknown (error: {str(e)[:20]}...)"
+    
+    def get_memory_requirement_gb(self, model_key, batch_size=None, is_inference=False):
+        """Get estimated memory requirement in GB for model"""
+        try:
+            # Model size estimates (in GB, roughly)
+            model_sizes = {
+                "distilgpt2": 0.3, "gpt2": 0.5, "gpt2-medium": 1.4,
+                "gpt2-large": 3.1, "gpt2-xl": 6.0,
+                "microsoft/DialoGPT-small": 0.5,
+                "microsoft/DialoGPT-medium": 1.4,
+                "microsoft/DialoGPT-large": 3.1,
+                "EleutherAI/gpt-neo-125M": 0.5,
+                "EleutherAI/gpt-neo-1.3B": 5.2,
+                "facebook/opt-125m": 0.5,
+                "facebook/opt-350m": 1.4,
+                "microsoft/phi-1_5": 5.2
+            }
+            
+            base_size = model_sizes.get(model_key, 0.5)  # Default to small model
+            
+            if is_inference:
+                # For inference, just need model + small overhead
+                return base_size * 1.2  # 20% overhead
+            else:
+                # For training, need model + gradients + optimizer states + batch
+                batch_size = batch_size or self.batch_size.get()
+                multiplier = 4.0 if not self.use_cpu_offload.get() else 2.5  # Less if using CPU offload
+                return base_size * multiplier * (batch_size / 4)  # Scale with batch size
+                
+        except Exception:
+            return 2.0  # Conservative estimate
+    
+    def check_memory_sufficiency(self, selected_device, model_key, batch_size=None, is_inference=False):
+        """Check if selected device has sufficient memory for the model"""
+        try:
+            required_gb = self.get_memory_requirement_gb(model_key, batch_size, is_inference)
+            
+            if "CPU Only" in selected_device or "CPU" in selected_device and "GPU" not in selected_device:
+                # Check system RAM
+                if psutil:
+                    ram_available = psutil.virtual_memory().available / (1024**3)
+                    return ram_available >= required_gb, ram_available, required_gb
+                return True, 0, required_gb  # Can't check, assume sufficient
+                
+            elif "CPU + GPU" in selected_device or "Hybrid" in selected_device:
+                # For hybrid, check both RAM and VRAM - use whichever has more space
+                ram_ok = True
+                vram_ok = True
+                ram_available = 0
+                vram_available = 0
+                
+                if psutil:
+                    ram_available = psutil.virtual_memory().available / (1024**3)
+                    ram_ok = ram_available >= required_gb * 0.6  # Hybrid uses less RAM
+                    
+                if torch and torch.cuda.is_available():
+                    vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    vram_used = torch.cuda.memory_allocated(0) / (1024**3)
+                    vram_available = vram_total - vram_used
+                    vram_ok = vram_available >= required_gb * 0.6  # Hybrid uses less VRAM
+                
+                return ram_ok or vram_ok, max(ram_available, vram_available), required_gb
+                
+            elif "GPU" in selected_device:
+                # Check VRAM
+                if torch and torch.cuda.is_available():
+                    gpu_idx = 0
+                    try:
+                        if selected_device.startswith("GPU ") and ":" in selected_device:
+                            gpu_idx = int(selected_device.split()[1].rstrip(":"))
+                    except:
+                        pass
+                        
+                    vram_total = torch.cuda.get_device_properties(gpu_idx).total_memory / (1024**3)
+                    vram_used = torch.cuda.memory_allocated(gpu_idx) / (1024**3)
+                    vram_available = vram_total - vram_used
+                    return vram_available >= required_gb, vram_available, required_gb
+                    
+            return True, 0, required_gb  # Can't determine, assume OK
+            
+        except Exception:
+            return True, 0, 0  # Error checking, assume OK
         
     def estimate_training_time(self, model_key, epochs):
         """Estimate training time"""
@@ -2820,107 +2916,11 @@ class ModelTrainer:
                 status_color = 'darkgreen'
                 self.tech_log(f"✅ Device match: Using {selected_device} as selected")
             
-            # Now update the memory display with proper information
-            self._update_memory_display_with_status(status_text, status_color)
+            # Now update the memory display 
+            self.update_memory_usage_display()
             
         except Exception as e:
             self.tech_log(f"❌ Error updating provider status in GUI: {e}")
-    
-    def _update_memory_display_with_status(self, status_text, status_color):
-        """Update memory display with current status and preserve model size info"""
-        try:
-            # Get current model path to calculate model size
-            model_path = self.model_path_var.get() if hasattr(self, 'model_path_var') else None
-            
-            memory_info = []
-            
-            # Get current device (could be fallback device)
-            current_device = self.device_combo.get()
-            
-            # Add memory information based on current active device
-            if "GPU" in current_device and "CPU" not in current_device:
-                # GPU mode - show VRAM info
-                try:
-                    if torch and torch.cuda.is_available():
-                        gpu_id = 0  # Default to first GPU
-                        if current_device.startswith("GPU ") and ":" in current_device:
-                            try:
-                                gpu_id = int(current_device.split()[1].rstrip(":"))
-                            except:
-                                pass
-                        
-                        vram_total = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
-                        vram_free = (torch.cuda.get_device_properties(gpu_id).total_memory - torch.cuda.memory_allocated(gpu_id)) / (1024**3)
-                        memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
-                except Exception:
-                    memory_info.append("🎮 VRAM: Unable to get GPU memory info")
-                    
-            elif "CPU + GPU" in current_device or "Hybrid" in current_device:
-                # Hybrid mode - show both RAM and VRAM
-                try:
-                    if psutil:
-                        ram_info = psutil.virtual_memory()
-                        ram_free = ram_info.available / (1024**3)
-                        ram_total = ram_info.total / (1024**3)
-                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
-                    else:
-                        memory_info.append("💾 RAM: psutil not available for memory info")
-                    
-                    if torch and torch.cuda.is_available():
-                        vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                        vram_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / (1024**3)
-                        memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
-                except ImportError:
-                    memory_info.append("💾 RAM: psutil not available for memory info")
-                except Exception:
-                    memory_info.append("💾 Memory info unavailable")
-            else:
-                # CPU only mode - show RAM info
-                try:
-                    if psutil:
-                        ram_info = psutil.virtual_memory()
-                        ram_free = ram_info.available / (1024**3)
-                        ram_total = ram_info.total / (1024**3)
-                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
-                    else:
-                        memory_info.append("💾 RAM: Install psutil for memory info")
-                except ImportError:
-                    memory_info.append("💾 RAM: Install psutil for memory info")
-                except Exception:
-                    memory_info.append("💾 RAM: Unable to get memory info")
-            
-            # Add model size if model is selected
-            if model_path and os.path.exists(model_path):
-                try:
-                    model_size = 0
-                    for root, dirs, files in os.walk(model_path):
-                        for file in files:
-                            if file.endswith('.onnx'):
-                                model_size += os.path.getsize(os.path.join(root, file))
-                    
-                    if model_size > 0:
-                        model_size_gb = model_size / (1024**3)
-                        if model_size_gb >= 1.0:
-                            memory_info.append(f"📦 Model: {model_size_gb:.1f}GB")
-                        else:
-                            model_size_mb = model_size / (1024**2)
-                            memory_info.append(f"📦 Model: {model_size_mb:.0f}MB")
-                except Exception:
-                    memory_info.append("📦 Model: Size unknown")
-            
-            # Build final display text
-            if memory_info:
-                full_display = f"{status_text} • {' • '.join(memory_info)}"
-            else:
-                full_display = status_text
-            
-            # Update the display
-            self.memory_usage_label.config(text=full_display, foreground=status_color)
-            
-        except Exception as e:
-            # Fallback display
-            self.memory_usage_label.config(text=f"{status_text} • Error getting memory info", foreground='red')
-            self.tech_log(f"❌ Error updating memory display: {e}")
     
     def update_device_options(self):
         """Update available device options based on hardware capabilities"""
@@ -2994,10 +2994,103 @@ class ModelTrainer:
             if "Checking" in selected_device or "Error" in selected_device:
                 return
             
-            # Use the same display logic as the status update
-            status_text = f"🔧 Selected: {selected_device}"
-            status_color = 'black'
-            self._update_memory_display_with_status(status_text, status_color)
+            # Get current model for memory requirement estimation
+            current_model = self.model_name.get()
+            
+            memory_info = []
+            memory_sufficient = True
+            
+            # Add memory information based on selected device
+            if "GPU" in selected_device and "CPU" not in selected_device:
+                # Pure GPU mode
+                try:
+                    if torch and torch.cuda.is_available():
+                        gpu_idx = 0
+                        if selected_device.startswith("GPU ") and ":" in selected_device:
+                            try:
+                                gpu_idx = int(selected_device.split()[1].rstrip(":"))
+                            except:
+                                pass
+                        
+                        vram_total = torch.cuda.get_device_properties(gpu_idx).total_memory / (1024**3)
+                        vram_free = (torch.cuda.get_device_properties(gpu_idx).total_memory - torch.cuda.memory_allocated(gpu_idx)) / (1024**3)
+                        memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
+                        
+                        # Check if memory is sufficient for inference
+                        if current_model:
+                            is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, is_inference=True)
+                            memory_sufficient = is_sufficient
+                    else:
+                        memory_info.append("⚠️ GPU selected but not available")
+                        memory_sufficient = False
+                except Exception:
+                    memory_info.append("🎮 VRAM: Unable to get GPU memory info")
+                    memory_sufficient = False
+                    
+            elif "CPU + GPU" in selected_device or "Hybrid" in selected_device:
+                # Hybrid mode - show both RAM and VRAM
+                try:
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    else:
+                        memory_info.append("💾 RAM: psutil not available for memory info")
+                    
+                    if torch and torch.cuda.is_available():
+                        vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                        vram_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / (1024**3)
+                        memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
+                    
+                    # Check if memory is sufficient for inference
+                    if current_model:
+                        is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, is_inference=True)
+                        memory_sufficient = is_sufficient
+                except Exception:
+                    memory_info.append("💾 Memory info unavailable")
+                    memory_sufficient = False
+                    
+            else:
+                # CPU only mode - show RAM info
+                try:
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                        
+                        # Check if memory is sufficient for inference
+                        if current_model:
+                            is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, is_inference=True)
+                            memory_sufficient = is_sufficient
+                    else:
+                        memory_info.append("💾 RAM: Install psutil for memory info")
+                except Exception:
+                    memory_info.append("💾 RAM: Unable to get memory info")
+                    memory_sufficient = False
+            
+            # Add model size estimate if model is selected
+            if current_model and current_model in self.model_info_db:
+                model_info = self.model_info_db[current_model]
+                model_size_str = model_info.get('size_pytorch', 'Unknown')
+                if model_size_str != 'Unknown':
+                    memory_info.append(f"📦 Model: {model_size_str}")
+            
+            # Determine color based on memory sufficiency
+            if memory_sufficient and memory_info:
+                color = 'green'
+            elif not memory_sufficient:
+                color = 'red'
+            else:
+                color = 'gray'
+            
+            # Update display
+            if memory_info:
+                display_text = " • ".join(memory_info)
+                self.memory_usage_label.config(text=display_text, foreground=color)
+            else:
+                self.memory_usage_label.config(text="Memory usage will be shown here", foreground='gray')
                 
         except Exception as e:
             self.memory_usage_label.config(text=f"Error updating memory info: {str(e)}", foreground='red')
@@ -3312,11 +3405,13 @@ Choose based on your hardware and model size."""
         try:
             selected_device = self.train_device_combo.get()
             current_model = self.model_name.get()
+            current_batch = self.batch_size.get()
             
             if not selected_device or selected_device in ["Checking devices...", "Error detecting devices"]:
                 return
             
             memory_info = []
+            memory_sufficient = True
             
             if "GPU" in selected_device and "CPU" not in selected_device:
                 # Pure GPU mode
@@ -3326,10 +3421,17 @@ Choose based on your hardware and model size."""
                         vram_total = torch.cuda.get_device_properties(gpu_idx).total_memory / (1024**3)
                         vram_free = (torch.cuda.get_device_properties(gpu_idx).total_memory - torch.cuda.memory_allocated(gpu_idx)) / (1024**3)
                         memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
+                        
+                        # Check if memory is sufficient for training
+                        if current_model:
+                            is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, current_batch, is_inference=False)
+                            memory_sufficient = is_sufficient
                     else:
                         memory_info.append("⚠️ GPU selected but not available")
+                        memory_sufficient = False
                 except Exception:
                     memory_info.append("🎮 VRAM: Unable to get GPU memory info")
+                    memory_sufficient = False
                     
             elif "CPU + GPU" in selected_device:
                 # Hybrid mode
@@ -3346,10 +3448,17 @@ Choose based on your hardware and model size."""
                         vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
                         vram_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / (1024**3)
                         memory_info.append(f"🎮 VRAM: {vram_free:.1f}GB free / {vram_total:.1f}GB total")
+                    
+                    # Check if memory is sufficient for training
+                    if current_model:
+                        is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, current_batch, is_inference=False)
+                        memory_sufficient = is_sufficient
                 except ImportError:
                     memory_info.append("💾 RAM: psutil not available for memory info")
+                    memory_sufficient = False
                 except Exception:
                     memory_info.append("💾 Memory info unavailable")
+                    memory_sufficient = False
                     
             else:
                 # CPU only mode
@@ -3358,11 +3467,20 @@ Choose based on your hardware and model size."""
                         ram_info = psutil.virtual_memory()
                         ram_free = ram_info.available / (1024**3)
                         ram_total = ram_info.total / (1024**3)
-                    memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                        
+                        # Check if memory is sufficient for training
+                        if current_model:
+                            is_sufficient, available, required = self.check_memory_sufficiency(selected_device, current_model, current_batch, is_inference=False)
+                            memory_sufficient = is_sufficient
+                    else:
+                        memory_info.append("💾 RAM: Install psutil for memory info")
                 except ImportError:
                     memory_info.append("💾 RAM: Install psutil for memory info")
+                    memory_sufficient = False
                 except Exception:
-                    memory_info.append("� RAM: Unable to get memory info")
+                    memory_info.append("💾 RAM: Unable to get memory info")
+                    memory_sufficient = False
             
             # Add model size estimate based on selected model
             if current_model and current_model in self.model_info_db:
@@ -3371,14 +3489,72 @@ Choose based on your hardware and model size."""
                 if model_size_str != 'Unknown':
                     memory_info.append(f"📦 Model: {model_size_str}")
             
+            # Determine color based on memory sufficiency
+            if memory_sufficient and memory_info:
+                color = 'green'
+            elif not memory_sufficient:
+                color = 'red'
+            else:
+                color = 'gray'
+            
             # Update display
             if memory_info:
-                self.train_memory_usage_label.config(text=" • ".join(memory_info), foreground='black')
+                self.train_memory_usage_label.config(text=" • ".join(memory_info), foreground=color)
             else:
                 self.train_memory_usage_label.config(text="Memory usage information unavailable", foreground='gray')
             
+            # Store memory sufficiency for training button state
+            self.memory_sufficient_for_training = memory_sufficient
+            
+            # Update training button state
+            self.update_training_button_state()
+            
         except Exception as e:
             self.train_memory_usage_label.config(text=f"Error updating memory info: {str(e)}", foreground='red')
+            self.memory_sufficient_for_training = False
+            self.update_training_button_state()
+    
+    def update_training_button_state(self):
+        """Update training button state based on memory sufficiency and other conditions"""
+        try:
+            # Check basic conditions first
+            if not self.system_ready:
+                return  # Don't update during system initialization
+                
+            training_enabled = self.enable_training.get()
+            dataset_selected = bool(self.dataset_path.get().strip())
+            output_selected = bool(self.output_path.get().strip())
+            
+            # For training: need dataset, output, AND sufficient memory
+            if training_enabled:
+                should_enable = (dataset_selected and 
+                               output_selected and 
+                               getattr(self, 'memory_sufficient_for_training', True) and
+                               ML_DEPENDENCIES_AVAILABLE)
+                               
+                if hasattr(self, 'train_button'):
+                    if should_enable:
+                        self.train_button.config(state='normal')
+                        if not getattr(self, 'memory_sufficient_for_training', True):
+                            self.update_task_status_error("Insufficient memory for training - Consider using CPU+GPU hybrid mode or a smaller model")
+                    else:
+                        self.train_button.config(state='disabled')
+                        if not getattr(self, 'memory_sufficient_for_training', True):
+                            self.update_task_status_error("Insufficient memory for training - Consider using CPU+GPU hybrid mode or a smaller model")
+                        elif not dataset_selected:
+                            self.update_task_status_error("Dataset file not selected - Please browse and select a dataset file")
+                        elif not output_selected:
+                            self.update_task_status_error("Output directory not selected - Please browse and select an output directory")
+            else:
+                # For export-only: just need output selected
+                should_enable = output_selected and ML_DEPENDENCIES_AVAILABLE
+                if hasattr(self, 'train_button'):
+                    self.train_button.config(state='normal' if should_enable else 'disabled')
+                    
+        except Exception as e:
+            # Fallback - keep button enabled to avoid breaking the UI
+            if hasattr(self, 'train_button'):
+                self.train_button.config(state='normal')
     
     def on_train_device_changed(self, event=None):
         """Handle training device selection change"""
