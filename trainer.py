@@ -5,10 +5,12 @@ Training and exporting language models with comprehensive system validation
 """
 
 # Standard library imports
+import gc
 import json
 import logging
 import os
 import random
+import re
 import shutil
 import signal
 import sys
@@ -1629,11 +1631,13 @@ class ModelTrainer:
                     self.log_message("ℹ️ Disk space check skipped (output path not configured)")
                     
                 # Check memory (basic)
-                import psutil
-                memory = psutil.virtual_memory()
-                memory_gb = memory.total / (1024**3)
-                available_gb = memory.available / (1024**3)
-                self.log_message(f"✅ System memory: {memory_gb:.1f} GB total, {available_gb:.1f} GB available")
+                if psutil:
+                    memory = psutil.virtual_memory()
+                    memory_gb = memory.total / (1024**3)
+                    available_gb = memory.available / (1024**3)
+                    self.log_message(f"✅ System memory: {memory_gb:.1f} GB total, {available_gb:.1f} GB available")
+                else:
+                    self.log_message("ℹ️ Memory check skipped (psutil not available)")
                 
             except Exception as e:
                 self.log_message(f"⚠️ Resource check failed: {e}")
@@ -1728,7 +1732,6 @@ class ModelTrainer:
             
         except Exception:
             # Last resort - exit the process immediately
-            import sys
             sys.exit(0)
         
     def on_model_changed(self, event=None):
@@ -2263,7 +2266,6 @@ class ModelTrainer:
                         self.log_message("🧹 GPU memory cache cleared")
                         
                         # Force garbage collection
-                        import gc
                         gc.collect()
                         
                         # Additional cleanup - try to clear all GPU memory
@@ -2275,7 +2277,6 @@ class ModelTrainer:
                     pass
                 
                 # Set environment variable to hide CUDA devices before retry
-                import os
                 old_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
                 os.environ["CUDA_VISIBLE_DEVICES"] = ""
                 
@@ -2365,11 +2366,9 @@ class ModelTrainer:
             self.log_message("🔄 Loading model...")
             if device_strategy == "cpu_only":
                 # Force CPU-only loading - ensure no GPU usage at all
-                import os
                 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Hide CUDA devices
                 
                 # Disable CUDA backends
-                import torch
                 torch.backends.cudnn.enabled = False
                 
                 model = AutoModelForCausalLM.from_pretrained(
@@ -2491,8 +2490,10 @@ class ModelTrainer:
         elif "CPU + GPU" in selected_device or "Hybrid" in selected_device:
             # Check if accelerate is available for advanced device mapping
             try:
-                import accelerate
-                return "Auto (GPU + CPU offloading)"
+                if accelerate:
+                    return "Auto (GPU + CPU offloading)"
+                else:
+                    raise ImportError("Accelerate not available")
             except ImportError:
                 return "Manual (GPU primary + CPU fallback)"
         elif "GPU" in selected_device:
@@ -2857,11 +2858,13 @@ class ModelTrainer:
             elif "CPU + GPU" in current_device or "Hybrid" in current_device:
                 # Hybrid mode - show both RAM and VRAM
                 try:
-                    import psutil
-                    ram_info = psutil.virtual_memory()
-                    ram_free = ram_info.available / (1024**3)
-                    ram_total = ram_info.total / (1024**3)
-                    memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    else:
+                        memory_info.append("💾 RAM: psutil not available for memory info")
                     
                     if torch and torch.cuda.is_available():
                         vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -2874,11 +2877,13 @@ class ModelTrainer:
             else:
                 # CPU only mode - show RAM info
                 try:
-                    import psutil
-                    ram_info = psutil.virtual_memory()
-                    ram_free = ram_info.available / (1024**3)
-                    ram_total = ram_info.total / (1024**3)
-                    memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    else:
+                        memory_info.append("💾 RAM: Install psutil for memory info")
                 except ImportError:
                     memory_info.append("💾 RAM: Install psutil for memory info")
                 except Exception:
@@ -3168,7 +3173,6 @@ TIPS FOR BEST PERFORMANCE
             
         except Exception as e:
             # Fallback to simple message box if custom dialog fails
-            import tkinter.messagebox as msgbox
             fallback_text = """Device Selection Help
 
 GPU: Fastest, uses graphics memory
@@ -3258,10 +3262,10 @@ Choose based on your hardware and model size."""
                 
                 # Update memory usage display for CPU mode
                 try:
-                    import psutil
-                    ram_info = psutil.virtual_memory()
-                    ram_free = ram_info.available / (1024**3)
-                    ram_total = ram_info.total / (1024**3)
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
                     
                     current_model = self.model_name.get()
                     model_info_text = ""
@@ -3330,11 +3334,13 @@ Choose based on your hardware and model size."""
             elif "CPU + GPU" in selected_device:
                 # Hybrid mode
                 try:
-                    import psutil
-                    ram_info = psutil.virtual_memory()
-                    ram_free = ram_info.available / (1024**3)
-                    ram_total = ram_info.total / (1024**3)
-                    memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
+                        memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
+                    else:
+                        memory_info.append("💾 RAM: psutil not available for memory info")
                     
                     if torch and torch.cuda.is_available():
                         vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -3348,10 +3354,10 @@ Choose based on your hardware and model size."""
             else:
                 # CPU only mode
                 try:
-                    import psutil
-                    ram_info = psutil.virtual_memory()
-                    ram_free = ram_info.available / (1024**3)
-                    ram_total = ram_info.total / (1024**3)
+                    if psutil:
+                        ram_info = psutil.virtual_memory()
+                        ram_free = ram_info.available / (1024**3)
+                        ram_total = ram_info.total / (1024**3)
                     memory_info.append(f"💾 RAM: {ram_free:.1f}GB free / {ram_total:.1f}GB total")
                 except ImportError:
                     memory_info.append("💾 RAM: Install psutil for memory info")
@@ -5216,8 +5222,6 @@ Choose based on your hardware and model size."""
     def _create_timestamped_output_dir(self, base_output_dir):
         """Create a timestamped directory for the current training/conversion session"""
         from datetime import datetime
-        import re
-        
         # Get current timestamp
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         
