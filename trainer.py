@@ -3941,6 +3941,7 @@ Choose based on your hardware and model size."""
             essential_files = {
                 "config.json",           # Model configuration
                 "tokenizer.json",        # Tokenizer (includes vocab, merges, special tokens)
+                "chat_template.jinja",   # Chat template for conversational models
                 "model.onnx",           # ONNX model
                 "model.onnx_data",      # ONNX model data (for large models)
             }
@@ -4011,7 +4012,8 @@ Choose based on your hardware and model size."""
                 # Verify we have the essential files (considering whether ONNX conversion happened)
                 missing_essential = []
                 for essential in essential_files:
-                    if essential not in final_files and essential != "model.onnx_data":  # model.onnx_data is optional
+                    # Both model.onnx_data and chat_template.jinja are optional
+                    if essential not in final_files and essential not in ["model.onnx_data", "chat_template.jinja"]:
                         if essential in ["model.onnx"] and not has_onnx_model:
                             continue  # Skip ONNX check if we're not in ONNX mode yet
                         missing_essential.append(essential)
@@ -4466,8 +4468,63 @@ Choose based on your hardware and model size."""
         self.test_output.insert(tk.END, "📝 Generated Text:\n")
         self.test_output.insert(tk.END, "=" * 30 + "\n\n")
         
+        # Try to format using chat template if available
+        model_path = self.model_path_var.get()
+        formatted_prompt = prompt  # Default to raw prompt
+        
+        if model_path:
+            try:
+                temp_tokenizer = AutoTokenizer.from_pretrained(model_path)
+                # Format as a single user message for better model response
+                formatted_prompt = self.format_chat_prompt(temp_tokenizer, prompt, conversation_history=None)
+            except Exception as e:
+                self.tech_log(f"⚠️ Error loading tokenizer for formatting: {e}")
+                # Fallback to raw prompt
+                formatted_prompt = prompt
+        
         # Start generation
-        self._start_generation(prompt, "generate_text")
+        self._start_generation(formatted_prompt, "generate_text")
+    
+    def format_chat_prompt(self, tokenizer, user_prompt, conversation_history=None):
+        """Format chat prompt using chat template if available, otherwise use simple format"""
+        try:
+            # Check if tokenizer has a chat template
+            if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+                self.tech_log("🎭 Using model's chat template for formatting")
+                
+                # Build conversation in the expected format
+                messages = []
+                
+                # Add conversation history if available
+                if conversation_history:
+                    for i, entry in enumerate(conversation_history):
+                        if entry.startswith("Human: "):
+                            messages.append({"role": "user", "content": entry[7:]})  # Remove "Human: " prefix
+                        elif entry.startswith("AI: ") or entry.startswith("Assistant: "):
+                            prefix_len = 4 if entry.startswith("AI: ") else 11
+                            messages.append({"role": "assistant", "content": entry[prefix_len:]})
+                
+                # Add current user message
+                messages.append({"role": "user", "content": user_prompt})
+                
+                # Apply chat template
+                formatted_prompt = tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+                
+                self.tech_log(f"✅ Chat template applied successfully")
+                return formatted_prompt
+                
+            else:
+                self.tech_log("📝 No chat template found, using simple format")
+                return f"Human: {user_prompt}\nAssistant:"
+                
+        except Exception as e:
+            self.tech_log(f"⚠️ Error applying chat template: {e}")
+            self.tech_log("📝 Falling back to simple format")
+            return f"Human: {user_prompt}\nAssistant:"
     
     def interactive_chat_mode(self):
         """Interactive chat mode with conversation history"""
@@ -4485,8 +4542,20 @@ Choose based on your hardware and model size."""
         self.test_output.insert(tk.END, "🤖 Assistant: ")
         self.test_output.see(tk.END)
         
-        # For chat, use just the user's message with a conversational prompt
-        chat_prompt = f"Human: {prompt}\nAssistant:"
+        # Load tokenizer from selected model path to get chat template
+        model_path = self.model_path_var.get()
+        if model_path:
+            try:
+                temp_tokenizer = AutoTokenizer.from_pretrained(model_path)
+                # Format using chat template if available
+                chat_prompt = self.format_chat_prompt(temp_tokenizer, prompt, self.conversation_history)
+            except Exception as e:
+                self.tech_log(f"⚠️ Error loading tokenizer for chat formatting: {e}")
+                # Fallback to simple format
+                chat_prompt = f"Human: {prompt}\nAssistant:"
+        else:
+            # Fallback to simple format if no model selected
+            chat_prompt = f"Human: {prompt}\nAssistant:"
         
         # Clear prompt for next input
         self.test_prompt_var.set("")
@@ -4814,9 +4883,16 @@ Choose based on your hardware and model size."""
             ort = onnxruntime
             np = numpy
             
-            # Load tokenizer
-            self.tech_log("📦 Loading tokenizer...")
+            # Load tokenizer from the selected model directory (saved during export)
+            self.tech_log("📦 Loading tokenizer from saved model directory...")
             tokenizer = AutoTokenizer.from_pretrained(model_path)
+            
+            # Check for chat template file and log its presence
+            chat_template_path = Path(model_path) / "chat_template.jinja"
+            if chat_template_path.exists():
+                self.tech_log("🎭 Chat template file found - conversation formatting available")
+            else:
+                self.tech_log("📝 No chat template file - using standard formatting")
             
             # Load ONNX model with GPU support and fallback
             self.tech_log("🔧 Loading ONNX model...")
