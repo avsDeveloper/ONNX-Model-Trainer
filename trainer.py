@@ -2665,7 +2665,8 @@ class ModelTrainer:
             # Save model
             self.log_message("💾 Saving trained model...")
             model.save_pretrained(train_dir)
-            tokenizer.save_pretrained(train_dir)
+            self.save_compatible_tokenizer(tokenizer, train_dir)
+            
             self.log_message("✅ Model saved successfully")
             self.log_message(f"📁 Model saved to: {train_dir}")
             
@@ -3872,37 +3873,159 @@ Choose based on your hardware and model size."""
                 else:
                     self.log_message("✅ Tokenizer already in standard HuggingFace format")
             
-            # Remove unnecessary files, keep only essential ones for optimized deployment
-            # Essential files for deployment: tokenizer.json, config.json, ONNX files, and external data files
-            essential_files = {"tokenizer.json", "config.json"}
-            model_dir_path = Path(model_dir)
+            # Remove redundant tokenizer files (keep only tokenizer.json and config.json)
+            # These files are redundant because tokenizer.json contains all the information
+            redundant_tokenizer_files = [
+                "merges.txt",           # Merges are in tokenizer.json
+                "vocab.json",           # Vocabulary is in tokenizer.json  
+                "special_tokens_map.json",  # Special tokens are in tokenizer.json
+                "tokenizer_config.json",    # Training-time config, not needed for inference
+                "added_tokens.json",        # Added tokens are in tokenizer.json
+                "sentencepiece.bpe.model"  # For SentencePiece models (if any)
+            ]
             
+            model_dir_path = Path(model_dir)
             removed_files = []
-            for file_path in model_dir_path.glob("*"):
-                if file_path.is_file():
-                    # Keep essential files, ONNX files, and external data files
-                    if (file_path.name in essential_files or 
-                        file_path.name.endswith('.onnx') or 
-                        file_path.name.endswith('.onnx_data')):
-                        continue  # Keep this file
-                    
-                    # Remove non-essential files
+            
+            for filename in redundant_tokenizer_files:
+                file_path = model_dir_path / filename
+                if file_path.exists():
                     try:
-                        file_path.unlink()  # Delete the file
-                        removed_files.append(file_path.name)
+                        file_path.unlink()
+                        removed_files.append(filename)
                     except Exception as e:
-                        self.log_message(f"⚠️ Could not remove {file_path.name}: {e}")
+                        self.log_message(f"⚠️ Could not remove {filename}: {e}")
             
             if removed_files:
-                self.log_message(f"🗑️ Removed unnecessary files: {', '.join(removed_files)}")
+                self.log_message(f"🗑️ Removed redundant tokenizer files: {', '.join(removed_files)}")
+                self.log_message("💡 All tokenization data is preserved in tokenizer.json")
             
-            # List final files
-            final_files = [f.name for f in model_dir_path.glob("*") if f.is_file()]
-            self.log_message(f"📁 Final deployment-ready files: {', '.join(sorted(final_files))}")
+            # Verify essential files exist
+            essential_files = ["tokenizer.json", "config.json"]
+            missing_files = []
+            
+            for filename in essential_files:
+                if not (model_dir_path / filename).exists():
+                    missing_files.append(filename)
+            
+            if missing_files:
+                self.log_message(f"❌ Warning: Missing essential files: {', '.join(missing_files)}")
+            else:
+                self.log_message("✅ All essential files present")
+            
+            # List final files (exclude ONNX files as they're added later)
+            current_files = []
+            for f in model_dir_path.glob("*"):
+                if f.is_file() and not f.name.endswith(('.onnx', '.onnx_data')):
+                    current_files.append(f.name)
+            
+            if current_files:
+                self.log_message(f"📁 Current deployment files: {', '.join(sorted(current_files))}")
+                self.log_message("🔧 ONNX model files will be added during export")
                 
         except Exception as e:
             self.log_message(f"⚠️ Warning: Could not ensure tokenizer compatibility: {e}")
             self.log_message("   Falling back to standard save - tokenizer should still work")
+    
+    def _cleanup_deployment_files(self, model_dir):
+        """Clean up any unnecessary files to ensure only essential deployment files remain"""
+        try:
+            model_dir_path = Path(model_dir)
+            if not model_dir_path.exists():
+                return
+            
+            # Check if ONNX files exist to determine if we can remove PyTorch files
+            has_onnx_model = (model_dir_path / "model.onnx").exists()
+            
+            # Define ALL files that should be kept for standard ONNX deployment
+            essential_files = {
+                "config.json",           # Model configuration
+                "tokenizer.json",        # Tokenizer (includes vocab, merges, special tokens)
+                "model.onnx",           # ONNX model
+                "model.onnx_data",      # ONNX model data (for large models)
+            }
+            
+            # Files that are commonly generated but should be removed for minimal deployment
+            files_to_remove = [
+                "merges.txt",            # Duplicate of data in tokenizer.json
+                "vocab.json",            # Duplicate of data in tokenizer.json
+                "special_tokens_map.json", # Duplicate of data in tokenizer.json
+                "tokenizer_config.json",   # Training-time config, not needed for inference
+                "added_tokens.json",       # Duplicate of data in tokenizer.json
+                "sentencepiece.bpe.model", # For SentencePiece models
+                "generation_config.json",  # Optional generation settings
+                "training_args.bin",       # Training arguments, not needed for inference
+                "trainer_state.json",      # Training state, not needed for inference
+                "optimizer.pt",            # Optimizer state
+                "scheduler.pt",            # Scheduler state
+                "rng_state.pth",           # Random state
+            ]
+            
+            # Only remove PyTorch files if ONNX files exist (conversion is complete)
+            if has_onnx_model:
+                files_to_remove.extend([
+                    "pytorch_model.bin",       # PyTorch weights, not needed after ONNX conversion
+                    "pytorch_model.bin.index.json", # PyTorch model index
+                    "model.safetensors",       # SafeTensors format, not needed after ONNX conversion
+                    "model.safetensors.index.json", # SafeTensors index
+                ])
+                self.log_message("🔧 ONNX model found - removing PyTorch model files")
+            else:
+                self.log_message("🔧 No ONNX model found - preserving PyTorch model files")
+            
+            removed_files = []
+            for filename in files_to_remove:
+                file_path = model_dir_path / filename
+                if file_path.exists():
+                    try:
+                        file_path.unlink()
+                        removed_files.append(filename)
+                    except Exception as e:
+                        self.log_message(f"⚠️ Could not remove {filename}: {e}")
+            
+            # Also remove any checkpoint directories that might have been created
+            for item in model_dir_path.iterdir():
+                if item.is_dir() and item.name.startswith("checkpoint-"):
+                    try:
+                        import shutil
+                        shutil.rmtree(str(item))
+                        removed_files.append(f"{item.name}/ (directory)")
+                    except Exception as e:
+                        self.log_message(f"⚠️ Could not remove directory {item.name}: {e}")
+            
+            if removed_files:
+                self.log_message(f"🧹 Cleanup: Removed {len(removed_files)} unnecessary files/directories")
+                self.log_message(f"   Removed: {', '.join(removed_files[:5])}")
+                if len(removed_files) > 5:
+                    self.log_message(f"   ... and {len(removed_files) - 5} more")
+            
+            # List final files to confirm what remains
+            final_files = []
+            for f in model_dir_path.glob("*"):
+                if f.is_file():
+                    final_files.append(f.name)
+            
+            if final_files:
+                self.log_message(f"✅ Final deployment files: {', '.join(sorted(final_files))}")
+                
+                # Verify we have the essential files (considering whether ONNX conversion happened)
+                missing_essential = []
+                for essential in essential_files:
+                    if essential not in final_files and essential != "model.onnx_data":  # model.onnx_data is optional
+                        if essential in ["model.onnx"] and not has_onnx_model:
+                            continue  # Skip ONNX check if we're not in ONNX mode yet
+                        missing_essential.append(essential)
+                
+                if missing_essential:
+                    self.log_message(f"⚠️ Warning: Missing essential files: {', '.join(missing_essential)}")
+                else:
+                    if has_onnx_model:
+                        self.log_message("💯 Perfect! All essential ONNX files present, no unnecessary files.")
+                    else:
+                        self.log_message("✅ Essential training files preserved for ONNX conversion.")
+            
+        except Exception as e:
+            self.log_message(f"⚠️ Warning: Error during deployment file cleanup: {e}")
             
     def run_onnx_export(self, source_dir, convert_dir):
         """Export trained model or pretrained model to ONNX format with GPU memory fallback"""
@@ -3999,15 +4122,18 @@ Choose based on your hardware and model size."""
                 self.log_message("✅ Trained model exported to ONNX")
             
             # Save the ONNX model
-            self.log_message("� Saving ONNX model...")
+            self.log_message("📦 Saving ONNX model...")
             ort_model.save_pretrained(str(convert_dir))
             
-            # Save tokenizer
+            # Save tokenizer using compatible method
             if source_dir is None:
                 tokenizer = AutoTokenizer.from_pretrained(self.model_name.get())
             else:
                 tokenizer = AutoTokenizer.from_pretrained(str(source_dir))
-            tokenizer.save_pretrained(convert_dir)
+            self.save_compatible_tokenizer(tokenizer, convert_dir)
+            
+            # Clean up any additional unnecessary files that might have been created
+            self._cleanup_deployment_files(convert_dir)
             
             # Check file size
             onnx_file = convert_dir / "model.onnx"
@@ -4061,15 +4187,18 @@ Choose based on your hardware and model size."""
             )
             self.log_message("✅ Quantization completed successfully")
             
-            # Copy tokenizer files
+            # Copy tokenizer files using compatible method
             tokenizer = AutoTokenizer.from_pretrained(str(convert_dir))
-            tokenizer.save_pretrained(quantize_dir)
+            self.save_compatible_tokenizer(tokenizer, quantize_dir)
             
             # Copy config files
             for file in ["config.json"]:
                 src = convert_dir / file
                 if src.exists():
                     shutil.copy2(str(src), str(quantize_dir / file))
+            
+            # Final cleanup to ensure only essential files remain
+            self._cleanup_deployment_files(quantize_dir)
             
             # Report results
             original_size = input_onnx.stat().st_size / (1024*1024)
