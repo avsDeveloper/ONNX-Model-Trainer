@@ -1,0 +1,5 @@
+# Keep the output directory structure but ignore its contents
+output/*
+
+# Python cache and compiled files
+__pycache__/*
