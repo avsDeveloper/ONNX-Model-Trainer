@@ -158,6 +158,9 @@ class ModelTrainer:
         self.root.geometry("1400x900")
         self.root.minsize(1200, 900)
         
+        # Set project root to the directory containing this trainer.py file
+        self.project_root = os.path.dirname(os.path.abspath(__file__))
+        
         # System status
         self.system_ready = False
         self.dependencies_checked = False
@@ -483,6 +486,36 @@ class ModelTrainer:
         self.setup_ui()
         self.start_system_check()
         
+    def convert_to_relative_path(self, path):
+        """Convert absolute path to relative path if within project directory"""
+        if not path:
+            return path
+            
+        try:
+            relative_path = os.path.relpath(path, self.project_root)
+            # Only use relative path if it doesn't go up too many directories
+            # This prevents paths like ../../../../../../../etc/passwd
+            if not relative_path.startswith('../../../'):
+                return relative_path
+        except ValueError:
+            # Keep absolute path if conversion fails (e.g., different drives on Windows)
+            pass
+        return path
+    
+    def resolve_project_path(self, path):
+        """Resolve a relative path to absolute path based on project root"""
+        if not path:
+            return path
+        
+        # If already absolute, return as-is
+        if os.path.isabs(path):
+            return path
+        
+        # Resolve relative to project root and normalize the path
+        resolved_path = os.path.join(self.project_root, path)
+        # Normalize to remove any ./ or ../ components
+        return os.path.normpath(resolved_path)
+    
     def setup_ui(self):
         """Set up the main user interface with tabbed layout"""
         
@@ -777,12 +810,13 @@ class ModelTrainer:
         path_frame.pack(fill='x', padx=5, pady=5)
         
         ttk.Label(path_frame, text="Model Directory:").pack(side='left')
-        self.model_path_var = tk.StringVar()
-        self.model_path_entry = ttk.Entry(path_frame, textvariable=self.model_path_var, width=25, state='readonly')
-        self.model_path_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
+        # Base directory where models are stored (separate from specific model path)
+        self.model_base_dir_var = tk.StringVar(value="./output")  # Default to output directory
+        self.model_base_dir_entry = ttk.Entry(path_frame, textvariable=self.model_base_dir_var, width=25, state='readonly')
+        self.model_base_dir_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
         
-        self.browse_model_button = ttk.Button(path_frame, text="Browse", command=self.browse_onnx_model, width=8)
-        self.browse_model_button.pack(side='right', padx=(5, 0))
+        self.browse_model_dir_button = ttk.Button(path_frame, text="Browse", command=self.browse_model_directory, width=8)
+        self.browse_model_dir_button.pack(side='right', padx=(5, 0))
         
         # Quick select from output folder
         quick_select_frame = ttk.Frame(model_select_frame)
@@ -795,6 +829,9 @@ class ModelTrainer:
         self.model_list_combo = ttk.Combobox(quick_select_frame, width=20, state='readonly')
         self.model_list_combo.pack(side='left', fill='x', expand=True, padx=(5, 5))
         self.model_list_combo.bind('<<ComboboxSelected>>', self.on_model_selected)
+        
+        # Variable for the actual selected model path (different from base directory)
+        self.model_path_var = tk.StringVar()  # This will hold the specific model path selected from dropdown
 
         # Generation parameters
         params_frame = ttk.LabelFrame(parent, text="Generation Parameters")
@@ -814,7 +851,7 @@ class ModelTrainer:
             "question_answering",
             "code_completion"
         ]
-        self.mode_combo.pack(side='left', padx=(5, 0), fill='x', expand=True)
+        self.mode_combo.pack(side='left', padx=(5, 0), fill='x',2 expand=True)
         self.mode_combo.bind('<<ComboboxSelected>>', self.on_mode_changed)
         
         # Mode descriptions
@@ -915,8 +952,15 @@ class ModelTrainer:
         self.tech_log_widget = scrolledtext.ScrolledText(tech_log_frame, wrap=tk.WORD, font=('Consolas', 8), height=8)
         self.tech_log_widget.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Initialize model list
-        self.refresh_model_list()
+        # Initialize model list after UI is set up
+        try:
+            self.refresh_model_list()
+        except Exception as e:
+            # Fallback initialization in case of early errors
+            print(f"Warning: Initial model list refresh failed: {e}")
+            if hasattr(self, 'model_list_combo'):
+                self.model_list_combo['values'] = ["Click Refresh to load models"]
+                self.model_list_combo.set("Click Refresh to load models")
         
     def setup_testing_output(self, parent):
         """Set up the testing output panel"""
@@ -1290,6 +1334,9 @@ class ModelTrainer:
             self.add_terminal_prompt(self.get_mode_prefix(mode))
             return
         
+        # Resolve model path relative to project root
+        resolved_model_path = self.resolve_project_path(model_path)
+        
         # Initialize conversation history if not exists
         if not hasattr(self, 'conversation_history'):
             self.conversation_history = []
@@ -1340,7 +1387,7 @@ class ModelTrainer:
         # Start generation in separate thread
         self.generation_thread = threading.Thread(
             target=self.run_terminal_generation,
-            args=(model_path, formatted_prompt, mode),
+            args=(resolved_model_path, formatted_prompt, mode),
             daemon=True
         )
         self.generation_thread.start()
@@ -2253,8 +2300,12 @@ class ModelTrainer:
             
     def browse_dataset(self):
         """Browse for dataset file"""
+        # Start from project root when browsing for dataset
+        initial_dir = self.resolve_project_path(".")
+        
         filename = filedialog.askopenfilename(
             title="Select Dataset File",
+            initialdir=initial_dir,
             filetypes=[
                 ("JSON files", "*.json"),
                 ("Text files", "*.txt"),
@@ -2263,6 +2314,8 @@ class ModelTrainer:
             ]
         )
         if filename:
+            # Convert absolute path to relative path if within project directory
+            filename = self.convert_to_relative_path(filename)
             self.dataset_path.set(filename)
             # Trigger validation after setting the path
             self.validate_training_configuration()
@@ -2275,8 +2328,20 @@ class ModelTrainer:
             
     def browse_output(self):
         """Browse for output directory"""
-        dirname = filedialog.askdirectory(title="Select Output Directory")
+        # Start from current output path if set, otherwise project root
+        current_output = self.output_path.get()
+        if current_output:
+            initial_dir = self.resolve_project_path(current_output)
+        else:
+            initial_dir = self.resolve_project_path(".")
+            
+        dirname = filedialog.askdirectory(
+            title="Select Output Directory",
+            initialdir=initial_dir
+        )
         if dirname:
+            # Convert absolute path to relative path if within project directory
+            dirname = self.convert_to_relative_path(dirname)
             self.output_path.set(dirname)
             # Trigger validation after setting the path
             self.validate_training_configuration()
@@ -2328,7 +2393,7 @@ class ModelTrainer:
             self.log_message(f"Output: {self.output_path.get()}")
             
             # Create session directory structure
-            base_output_dir = Path(self.output_path.get())
+            base_output_dir = Path(self.resolve_project_path(self.output_path.get()))
             base_output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create session directory with simple naming
@@ -3787,7 +3852,8 @@ Choose based on your hardware and model size."""
         """Load and format the dataset from JSON file"""
         try:
             # Use global Dataset import
-            with open(self.dataset_path.get(), "r", encoding="utf-8") as f:
+            dataset_path = self.resolve_project_path(self.dataset_path.get())
+            with open(dataset_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
             # Format data similar to the original script
@@ -4369,6 +4435,22 @@ Choose based on your hardware and model size."""
         
         # Restore original training device display
         self.update_training_device_display("auto")
+        
+        # Auto-update model base directory to match output directory if they're different
+        # This helps users automatically see their newly trained models
+        output_dir = self.output_path.get()
+        current_model_dir = self.model_base_dir_var.get()
+        
+        if output_dir and output_dir != current_model_dir:
+            self.model_base_dir_var.set(output_dir)
+            self.tech_log(f"📁 Updated model directory to match output: {output_dir}")
+        
+        # Refresh model list to show newly trained models
+        try:
+            self.refresh_model_list()
+            self.tech_log("🔄 Refreshed model list after training completion")
+        except Exception as e:
+            self.tech_log(f"Warning: Could not refresh model list after training: {e}")
     
     def refresh_quantized_model_list(self):
         """Refresh the list of available quantized ONNX models (legacy method)"""
@@ -4429,21 +4511,52 @@ Choose based on your hardware and model size."""
             if hasattr(self, 'update_memory_usage_display'):
                 self.update_memory_usage_display()
     
-    def browse_onnx_model(self):
-        """Browse for ONNX model directory"""
+    def browse_model_directory(self):
+        """Browse for the base model directory (where ONNX models are stored)"""
         from tkinter import filedialog
+        
+        # Resolve the initial directory to absolute path for file dialog
+        current_base_dir = self.model_base_dir_var.get() or "./output"
+        initial_dir = self.resolve_project_path(current_base_dir)
+        
+        dirname = filedialog.askdirectory(
+            title="Select Model Base Directory (containing trained models)",
+            initialdir=initial_dir
+        )
+        
+        if dirname:
+            # Convert absolute path to relative path if within project directory
+            dirname = self.convert_to_relative_path(dirname)
+            self.model_base_dir_var.set(dirname)
+            self.tech_log(f"📁 Model base directory changed to: {dirname}")
+            
+            # Automatically refresh the model list when base directory changes
+            try:
+                self.refresh_model_list()
+            except Exception as e:
+                self.tech_log(f"Warning: Could not refresh model list: {e}")
+    
+    def browse_onnx_model(self):
+        """Browse for a specific ONNX model directory (legacy function)"""
+        from tkinter import filedialog
+        
+        # Resolve the initial directory to absolute path for file dialog
+        current_base_dir = self.model_base_dir_var.get() or "./output"
+        initial_dir = self.resolve_project_path(current_base_dir)
         
         dirname = filedialog.askdirectory(
             title="Select ONNX Model Directory (containing model.onnx)",
-            initialdir="./output"
+            initialdir=initial_dir
         )
         
         if dirname:
             model_path = Path(dirname)
             if (model_path / "model.onnx").exists():
+                # Convert absolute path to relative path if within project directory
+                dirname = self.convert_to_relative_path(dirname)
                 self.model_path_var.set(dirname)
                 self.generate_button.config(state='normal')
-                self.tech_log(f"📁 Selected model directory: {dirname}")
+                self.tech_log(f"📁 Selected specific model directory: {dirname}")
                 # Update memory usage display when model changes
                 if hasattr(self, 'update_memory_usage_display'):
                     self.update_memory_usage_display()
@@ -5954,16 +6067,23 @@ Choose based on your hardware and model size."""
         
     def save_logs(self):
         """Save logs to file"""
+        # Start from project root when saving logs
+        initial_dir = self.resolve_project_path(".")
+        
         filename = filedialog.asksaveasfilename(
             title="Save Training Logs",
+            initialdir=initial_dir,
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
         )
         if filename:
             try:
+                # Convert absolute path to relative path for display only
+                display_filename = self.convert_to_relative_path(filename)
+                    
                 with open(filename, 'w') as f:
                     f.write(self.log_text.get('1.0', tk.END))
-                self.log_message(f"📄 Logs saved to: {filename}")
+                self.log_message(f"📄 Logs saved to: {display_filename}")
             except Exception as e:
                 self.log_message(f"❌ Error saving logs: {str(e)}")
                 
@@ -5973,8 +6093,17 @@ Choose based on your hardware and model size."""
     
     def browse_onnx_model(self):
         """Browse for ONNX model directory"""
-        dirname = filedialog.askdirectory(title="Select ONNX Model Directory")
+        # Resolve the initial directory to absolute path for file dialog
+        current_base_dir = self.model_base_dir_var.get() if hasattr(self, 'model_base_dir_var') else "./output"
+        initial_dir = self.resolve_project_path(current_base_dir or "./output")
+        
+        dirname = filedialog.askdirectory(
+            title="Select ONNX Model Directory",
+            initialdir=initial_dir
+        )
         if dirname:
+            # Convert absolute path to relative path if within project directory
+            dirname = self.convert_to_relative_path(dirname)
             self.model_path_var.set(dirname)
     
     def refresh_model_list_with_feedback(self):
@@ -6003,18 +6132,30 @@ Choose based on your hardware and model size."""
             self.tech_log("✅ Model list refresh complete")
 
     def refresh_model_list(self):
-        """Refresh the list of available models from output directory"""
+        """Refresh the list of available models from the base model directory"""
         try:
-            output_dir = Path(self.output_path.get())
+            # Use the model base directory instead of output path
+            base_dir_path = self.model_base_dir_var.get()
+            if not base_dir_path:
+                base_dir_path = "./output"  # Default fallback
+                self.model_base_dir_var.set(base_dir_path)
+                
+            # Resolve relative to project root instead of current working directory
+            base_dir = Path(self.resolve_project_path(base_dir_path))
+            
+            self.tech_log(f"🔍 Scanning for models in: {base_dir}")
+            
             models = []
             
             # Clear existing model paths to ensure deleted models are removed
             self.model_paths = {}
             
             # Look for ONNX models in session subdirectories
-            if output_dir.exists():
-                for session_dir in output_dir.glob("*"):
+            if base_dir.exists():
+                session_count = 0
+                for session_dir in base_dir.glob("*"):
                     if session_dir.is_dir():
+                        session_count += 1
                         # Check for converted and quantized models in this session directory
                         for subdir in ['2_converted', '3_quantized']:
                             model_dir = session_dir / subdir
@@ -6026,31 +6167,52 @@ Choose based on your hardware and model size."""
                                 display_name = f"{session_name} ({model_type})"
                                 
                                 models.append(display_name)
-                                self.model_paths[display_name] = str(model_dir)
+                                # Store the relative path for the model directory
+                                relative_model_path = self.convert_to_relative_path(str(model_dir))
+                                self.model_paths[display_name] = relative_model_path
+                                self.tech_log(f"  ✅ Found: {display_name} at {relative_model_path}")
+                
+                self.tech_log(f"📁 Scanned {session_count} session directories")
+            else:
+                self.tech_log(f"❌ Model directory does not exist: {base_dir}")
             
             # Update combobox values
             if models:
+                # Sort models to show newest first (if possible based on timestamps)
+                try:
+                    models.sort(key=lambda x: Path(self.model_paths[x]).stat().st_mtime, reverse=True)
+                    self.tech_log("📅 Sorted models by modification time (newest first)")
+                except Exception as sort_error:
+                    models.sort()  # Fallback to alphabetical sorting
+                    self.tech_log(f"📝 Sorted models alphabetically (timestamp sort failed: {sort_error})")
+                    
                 self.model_list_combo['values'] = models
                 # Set first available model as selected
                 self.model_list_combo.set(models[0])
                 self.model_path_var.set(self.model_paths[models[0]])
                 self.generate_button.config(state='normal')
-                self.tech_log(f"✅ Found {len(models)} model(s): {', '.join(models)}")
+                self.tech_log(f"✅ Loaded {len(models)} model(s) successfully")
+                if len(models) <= 3:
+                    self.tech_log(f"   Models: {', '.join(models)}")
+                else:
+                    self.tech_log(f"   Models: {', '.join(models[:3])} + {len(models)-3} more")
             else:
                 self.model_list_combo['values'] = ["No models found"]
                 self.model_list_combo.set("No models found")
                 self.model_path_var.set("")
                 self.generate_button.config(state='disabled')
-                self.tech_log("⚠️ No ONNX models found in output directory")
+                self.tech_log("⚠️ No ONNX models found - train a model first or use Refresh button")
                 
         except Exception as e:
             self.tech_log(f"❌ Error refreshing model list: {e}")
             # Ensure UI is in a consistent state even on error
-            self.model_list_combo['values'] = ["Error loading models"]
-            self.model_list_combo.set("Error loading models")
-            self.model_path_var.set("")
-            self.generate_button.config(state='disabled')
-            self.tech_log(f"⚠️ Error refreshing model list: {e}")
+            if hasattr(self, 'model_list_combo'):
+                self.model_list_combo['values'] = ["Error loading models"]
+                self.model_list_combo.set("Error loading models")
+            if hasattr(self, 'model_path_var'):
+                self.model_path_var.set("")
+            if hasattr(self, 'generate_button'):
+                self.generate_button.config(state='disabled')
     
     def test_log(self, message):
         """Log message to test output (fallback method)"""

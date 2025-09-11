@@ -1,4 +1,3 @@
-
 This app is primarily written by AI, intended to train AI models using AI-generated datasets. These models will be used by AI-based apps :)
 
 Use it at your own risk, it won't break your PC, but I can guarantee nothing. I made it for myself, and I happily use it for my next cross-platform project.
@@ -102,6 +101,36 @@ psutil>=5.8.0
    ```bash
    python3 trainer.py
    ```
+
+## 📦 Project Portability
+
+The ONNX Model Trainer is designed to be **fully portable** and can be easily moved between directories, devices, and systems:
+
+### 🔄 Relative Path Architecture
+- **Automatic Path Conversion**: All file dialogs automatically convert absolute paths to relative paths when files are within the project directory
+- **Relative Defaults**: Default paths use relative notation (`./output`, `./dataset.json`)
+- **Cross-Platform Compatibility**: Works seamlessly across Linux, Windows, and macOS
+- **No Hardcoded Paths**: No absolute paths are stored in configuration files
+
+### 📁 Safe Directory Structure
+```
+onnx-model-trainer/
+├── trainer.py           # Main application
+├── dataset.json         # Sample training data
+├── README.md           # Documentation
+└── output/             # Generated models (relative paths)
+    └── ModelName/
+        ├── 1_trained/   # PyTorch models
+        ├── 2_converted/ # ONNX models  
+        └── 3_quantized/ # Optimized models
+```
+
+### 🚀 Easy Migration
+1. **Copy entire folder** to new location/device
+2. **Install dependencies**: `pip install -r requirements.txt`
+3. **Run**: `python3 trainer.py` - everything works immediately!
+
+*No configuration changes, no path fixes, no reinstallation required.*
 
 ## 📖 User Manual
 
@@ -717,12 +746,14 @@ output/
 ### Alternative Formats (Auto-detected)
 ```json
 [
-    {"text": "Human: Hello\nAssistant: Hi there! How can I help you today?"},
-    {"text": "Human: What's the weather like?\nAssistant: I don't have access to current weather data..."}
+    {"text": "Human: Hello
+Assistant: Hi there! How can I help you today?"},
+    {"text": "Human: What's the weather like?
+Assistant: I don't have access to current weather data..."}
 ]
 ```
 
-## � Troubleshooting
+## 🛠 Troubleshooting
 
 ### Installation Issues
 ```bash
