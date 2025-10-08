@@ -851,7 +851,7 @@ class ModelTrainer:
             "question_answering",
             "code_completion"
         ]
-        self.mode_combo.pack(side='left', padx=(5, 0), fill='x',2 expand=True)
+        self.mode_combo.pack(side='left', padx=(5, 0), fill='x', expand=True)
         self.mode_combo.bind('<<ComboboxSelected>>', self.on_mode_changed)
         
         # Mode descriptions
